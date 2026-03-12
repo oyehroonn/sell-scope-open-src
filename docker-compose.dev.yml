@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: sellscope_db
+    environment:
+      POSTGRES_USER: sellscope
+      POSTGRES_PASSWORD: sellscope_dev_password
+      POSTGRES_DB: sellscope
+    ports:
+      - "5432:5432"
+    volumes:
+      - sellscope_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sellscope"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sellscope_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - sellscope_redis_data:/data
+
+volumes:
+  sellscope_postgres_data:
+  sellscope_redis_data:

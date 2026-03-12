@@ -1,0 +1,16 @@
+# Output files
+output/
+*.csv
+*.json
+
+# Environment
+.env
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
+
+# Logs
+*.log

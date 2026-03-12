@@ -1,0 +1,32 @@
+{
+  "name": "sellscope",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stock Contributor Intelligence Platform - The Bloomberg Terminal for Stock Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sellscope/sellscope"
+  },
+  "license": "MIT",
+  "scripts": {
+    "dev": "pnpm --filter @sellscope/web dev",
+    "dev:api": "cd apps/api && python -m uvicorn main:app --reload --port 8000",
+    "dev:all": "concurrently \"pnpm dev\" \"pnpm dev:api\"",
+    "build": "pnpm --filter @sellscope/web build",
+    "start": "pnpm --filter @sellscope/web start",
+    "lint": "pnpm --filter @sellscope/web lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "type-check": "pnpm --filter @sellscope/web type-check",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules .turbo"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  },
+  "packageManager": "pnpm@9.1.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

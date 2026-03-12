@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "SellScope - Adobe Stock Assistant",
+  "version": "1.0.0",
+  "description": "AI-powered assistant for Adobe Stock contributors. Get opportunity scores, keyword suggestions, and portfolio insights directly in the contributor portal.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "identity"
+  ],
+  "host_permissions": [
+    "https://stock.adobe.com/*",
+    "https://contributor.stock.adobe.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://stock.adobe.com/*",
+        "https://contributor.stock.adobe.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options.html"
+}
