@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -12,21 +11,35 @@ import {
   ArrowUp,
   ArrowDown,
   Minus,
-  Filter,
   Lightbulb,
   Loader2,
   Search,
   Sparkles,
   Target,
-  TrendingUp,
   RefreshCw,
-  Zap,
   BarChart3,
   Users,
   Hash,
+  X,
+  CheckCircle,
+  AlertTriangle,
+  Clock,
+  Zap,
+  Camera,
+  FileText,
+  Copy,
+  Check,
+  Save,
+  Star,
+  Bookmark,
+  BookmarkCheck,
+  Trash2,
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const SAVED_RESEARCHES_KEY = "sellscope_saved_researches";
+const OPPORTUNITY_KEYWORDS_KEY = "sellscope_opportunity_keywords";
 
 interface KeywordResult {
   keyword: string;
@@ -41,17 +54,64 @@ interface KeywordResult {
   urgency: string;
   related_searches: string[];
   categories: { name: string }[];
+  scraped_at?: string;
+  source?: string;
 }
 
-interface TrendingKeyword {
-  keyword: string;
-  nb_results: number;
-  asset_count: number;
-  demand_score: number;
-  competition_score: number;
-  opportunity_score: number;
-  trend: string;
-  urgency: string;
+interface SavedResearch extends KeywordResult {
+  saved_at: string;
+  is_opportunity: boolean;
+}
+
+function Modal({ 
+  isOpen, 
+  onClose, 
+  title, 
+  children 
+}: { 
+  isOpen: boolean; 
+  onClose: () => void; 
+  title: string;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    if (isOpen) {
+      document.addEventListener("keydown", handleEscape);
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+      document.body.style.overflow = "unset";
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div 
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="relative z-50 w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white dark:bg-gray-900 rounded-lg shadow-xl m-4">
+        <div className="sticky top-0 flex items-center justify-between p-4 border-b bg-white dark:bg-gray-900">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          <button
+            onClick={onClose}
+            className="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="p-4">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function KeywordsPage() {
@@ -59,28 +119,85 @@ export default function KeywordsPage() {
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<KeywordResult[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
-  const [trendingKeywords, setTrendingKeywords] = useState<TrendingKeyword[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [loadingTrending, setLoadingTrending] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [useLiveScraping, setUseLiveScraping] = useState(true);
+  
+  const [savedResearches, setSavedResearches] = useState<SavedResearch[]>([]);
+  const [activeTab, setActiveTab] = useState<"researched" | "saved">("researched");
+  
+  const [selectedKeyword, setSelectedKeyword] = useState<KeywordResult | null>(null);
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [showBriefModal, setShowBriefModal] = useState(false);
+  const [copiedBrief, setCopiedBrief] = useState(false);
 
   useEffect(() => {
-    fetchTrendingKeywords();
+    loadSavedResearches();
   }, []);
 
-  const fetchTrendingKeywords = async () => {
-    setLoadingTrending(true);
+  const loadSavedResearches = () => {
     try {
-      const response = await fetch(`${API_BASE}/keywords/trending?limit=12`);
-      if (response.ok) {
-        const data = await response.json();
-        setTrendingKeywords(data);
+      const saved = localStorage.getItem(SAVED_RESEARCHES_KEY);
+      if (saved) {
+        setSavedResearches(JSON.parse(saved));
       }
     } catch (e) {
-      console.error("Failed to fetch trending keywords:", e);
-    } finally {
-      setLoadingTrending(false);
+      console.error("Failed to load saved researches:", e);
     }
+  };
+
+  const saveSavedResearches = (researches: SavedResearch[]) => {
+    try {
+      localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(researches));
+      setSavedResearches(researches);
+    } catch (e) {
+      console.error("Failed to save researches:", e);
+    }
+  };
+
+  const saveResearch = (result: KeywordResult) => {
+    const existing = savedResearches.find(r => r.keyword.toLowerCase() === result.keyword.toLowerCase());
+    if (existing) {
+      const updated = savedResearches.map(r => 
+        r.keyword.toLowerCase() === result.keyword.toLowerCase()
+          ? { ...result, saved_at: new Date().toISOString(), is_opportunity: r.is_opportunity }
+          : r
+      );
+      saveSavedResearches(updated);
+    } else {
+      const newResearch: SavedResearch = {
+        ...result,
+        saved_at: new Date().toISOString(),
+        is_opportunity: false,
+      };
+      saveSavedResearches([newResearch, ...savedResearches]);
+    }
+  };
+
+  const removeResearch = (keyword: string) => {
+    const updated = savedResearches.filter(r => r.keyword.toLowerCase() !== keyword.toLowerCase());
+    saveSavedResearches(updated);
+  };
+
+  const toggleOpportunity = (keyword: string) => {
+    const updated = savedResearches.map(r => 
+      r.keyword.toLowerCase() === keyword.toLowerCase()
+        ? { ...r, is_opportunity: !r.is_opportunity }
+        : r
+    );
+    saveSavedResearches(updated);
+    
+    const opportunities = updated.filter(r => r.is_opportunity);
+    localStorage.setItem(OPPORTUNITY_KEYWORDS_KEY, JSON.stringify(opportunities));
+  };
+
+  const isResearchSaved = (keyword: string) => {
+    return savedResearches.some(r => r.keyword.toLowerCase() === keyword.toLowerCase());
+  };
+
+  const isMarkedAsOpportunity = (keyword: string) => {
+    const saved = savedResearches.find(r => r.keyword.toLowerCase() === keyword.toLowerCase());
+    return saved?.is_opportunity || false;
   };
 
   const fetchSuggestions = async (query: string) => {
@@ -105,16 +222,21 @@ export default function KeywordsPage() {
     setIsSearching(true);
     setError(null);
     setHasSearched(true);
+    setSuggestions([]);
     
     try {
-      const response = await fetch(`${API_BASE}/keywords/analyze/${encodeURIComponent(searchQuery.trim())}`);
+      const liveParam = useLiveScraping ? "live=true" : "";
+      const response = await fetch(
+        `${API_BASE}/keywords/analyze/${encodeURIComponent(searchQuery.trim())}?${liveParam}`
+      );
       
       if (response.ok) {
         const data = await response.json();
         setResults([data]);
         
-        // Also search for related keywords
-        const searchResponse = await fetch(`${API_BASE}/keywords/search?q=${encodeURIComponent(searchQuery.trim())}&page_size=10`);
+        const searchResponse = await fetch(
+          `${API_BASE}/keywords/search?q=${encodeURIComponent(searchQuery.trim())}&page_size=10`
+        );
         if (searchResponse.ok) {
           const searchData = await searchResponse.json();
           if (searchData.keywords && searchData.keywords.length > 0) {
@@ -126,7 +248,8 @@ export default function KeywordsPage() {
           }
         }
       } else {
-        setError("Failed to analyze keyword. Try again.");
+        const errorData = await response.json().catch(() => ({}));
+        setError(errorData.detail || "Failed to analyze keyword. Try again.");
       }
     } catch (e) {
       console.error("Search error:", e);
@@ -144,6 +267,79 @@ export default function KeywordsPage() {
   const handleInputChange = (value: string) => {
     setSearchQuery(value);
     fetchSuggestions(value);
+  };
+
+  const openDetailsModal = useCallback((result: KeywordResult) => {
+    setSelectedKeyword(result);
+    setShowDetailsModal(true);
+  }, []);
+
+  const openBriefModal = useCallback((result: KeywordResult) => {
+    setSelectedKeyword(result);
+    setShowBriefModal(true);
+  }, []);
+
+  const closeDetailsModal = useCallback(() => {
+    setShowDetailsModal(false);
+  }, []);
+
+  const closeBriefModal = useCallback(() => {
+    setShowBriefModal(false);
+  }, []);
+
+  const generateBrief = (kw: KeywordResult): string => {
+    const competitionLevel = kw.competition_score >= 70 ? "high" : kw.competition_score >= 40 ? "medium" : "low";
+    const demandLevel = kw.demand_score >= 70 ? "high" : kw.demand_score >= 40 ? "medium" : "low";
+    
+    let recommendation = "";
+    if (kw.opportunity_score >= 70) {
+      recommendation = "This is a HIGH PRIORITY keyword. Create content immediately to capitalize on the opportunity.";
+    } else if (kw.opportunity_score >= 50) {
+      recommendation = "This is a GOOD OPPORTUNITY. Add to your production queue and create quality content.";
+    } else {
+      recommendation = "This keyword has LIMITED OPPORTUNITY. Consider focusing on higher-scoring alternatives.";
+    }
+
+    const contentIdeas = [
+      `Professional ${kw.keyword} photography with clean backgrounds`,
+      `${kw.keyword} in modern, minimalist settings`,
+      `Diverse people interacting with ${kw.keyword}`,
+      `${kw.keyword} lifestyle and workspace shots`,
+      `Abstract or conceptual ${kw.keyword} imagery`,
+    ];
+
+    return `KEYWORD BRIEF: ${kw.keyword.toUpperCase()}
+${"=".repeat(50)}
+
+OPPORTUNITY ANALYSIS
+Opportunity Score: ${kw.opportunity_score.toFixed(0)}/100
+Demand Score: ${kw.demand_score.toFixed(0)}/100 (${demandLevel})
+Competition Score: ${kw.competition_score.toFixed(0)}/100 (${competitionLevel})
+Urgency: ${kw.urgency.toUpperCase()}
+Trend: ${kw.trend.toUpperCase()}
+
+MARKET DATA
+Total Results on Adobe Stock: ${kw.nb_results.toLocaleString()}
+Unique Contributors: ${kw.unique_contributors}
+
+RECOMMENDATION
+${recommendation}
+
+CONTENT IDEAS
+${contentIdeas.map((idea, i) => `${i + 1}. ${idea}`).join("\n")}
+
+RELATED KEYWORDS
+${kw.related_searches?.slice(0, 8).join(", ") || "No related keywords found"}
+
+Generated: ${new Date().toLocaleString()}`;
+  };
+
+  const copyBrief = async () => {
+    if (!selectedKeyword) return;
+    const brief = generateBrief(selectedKeyword);
+    await navigator.clipboard.writeText(brief);
+    setCopiedBrief(true);
+    setTimeout(() => setCopiedBrief(false), 2000);
   };
 
   const getScoreColor = (score: number) => {
@@ -181,6 +377,169 @@ export default function KeywordsPage() {
     return num.toString();
   };
 
+  const renderKeywordCard = (result: KeywordResult, showSaveActions: boolean = true, isSavedView: boolean = false) => {
+    const isSaved = isResearchSaved(result.keyword);
+    const isOpportunity = isMarkedAsOpportunity(result.keyword);
+
+    return (
+      <Card key={result.keyword} className="hover:border-primary/50 transition-colors">
+        <CardContent className="pt-6">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 mb-2">
+                <h3 className="font-semibold text-lg">{result.keyword}</h3>
+                {result.categories && result.categories.length > 0 && (
+                  <Badge variant="outline">
+                    {result.categories[0]?.name || "General"}
+                  </Badge>
+                )}
+                {getTrendIcon(result.trend)}
+                {isOpportunity && (
+                  <Badge className="bg-amber-500 text-white">
+                    <Star className="h-3 w-3 mr-1 fill-current" />
+                    Opportunity
+                  </Badge>
+                )}
+              </div>
+              
+              <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+                <div className="flex items-center gap-1">
+                  <BarChart3 className="h-4 w-4" />
+                  <span>Results: {formatNumber(result.nb_results)}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Users className="h-4 w-4" />
+                  <span>Contributors: {result.unique_contributors}</span>
+                </div>
+                <div>
+                  Competition: {getCompetitionLabel(result.competition_score)}
+                </div>
+                <Badge className={`${getScoreBg(result.demand_score)} text-white`}>
+                  Demand: {result.demand_score.toFixed(0)}
+                </Badge>
+              </div>
+
+              {result.related_searches && result.related_searches.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1">
+                  <span className="text-xs text-muted-foreground mr-1">Related:</span>
+                  {result.related_searches.slice(0, 5).map((related) => (
+                    <Badge
+                      key={related}
+                      variant="secondary"
+                      className="text-xs cursor-pointer hover:bg-primary hover:text-primary-foreground"
+                      onClick={() => handleSuggestionClick(related)}
+                    >
+                      {related}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="text-center">
+                <div className="text-sm text-muted-foreground mb-1">
+                  Opportunity Score
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-20">
+                    <Progress value={result.opportunity_score} className="h-2" />
+                  </div>
+                  <span className={`text-2xl font-bold ${getScoreColor(result.opportunity_score)}`}>
+                    {result.opportunity_score.toFixed(0)}
+                  </span>
+                </div>
+                <Badge 
+                  variant="outline" 
+                  className={`mt-1 ${
+                    result.urgency === "high" 
+                      ? "border-red-500 text-red-500" 
+                      : result.urgency === "medium"
+                        ? "border-amber-500 text-amber-500"
+                        : ""
+                  }`}
+                >
+                  {result.urgency} urgency
+                </Badge>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {showSaveActions && (
+                  <div className="flex gap-1">
+                    <Button
+                      variant={isSaved ? "secondary" : "outline"}
+                      size="sm"
+                      className="gap-1"
+                      onClick={() => isSaved ? removeResearch(result.keyword) : saveResearch(result)}
+                      title={isSaved ? "Remove from saved" : "Save research"}
+                    >
+                      {isSaved ? (
+                        <BookmarkCheck className="h-4 w-4 text-emerald-500" />
+                      ) : (
+                        <Save className="h-4 w-4" />
+                      )}
+                      {isSaved ? "Saved" : "Save"}
+                    </Button>
+                    {isSaved && (
+                      <Button
+                        variant={isOpportunity ? "default" : "outline"}
+                        size="sm"
+                        className={`gap-1 ${isOpportunity ? "bg-amber-500 hover:bg-amber-600" : ""}`}
+                        onClick={() => toggleOpportunity(result.keyword)}
+                        title={isOpportunity ? "Unmark as opportunity" : "Mark as opportunity"}
+                      >
+                        <Star className={`h-4 w-4 ${isOpportunity ? "fill-current" : ""}`} />
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {isSavedView && (
+                  <div className="flex gap-1">
+                    <Button
+                      variant={isOpportunity ? "default" : "outline"}
+                      size="sm"
+                      className={`gap-1 ${isOpportunity ? "bg-amber-500 hover:bg-amber-600" : ""}`}
+                      onClick={() => toggleOpportunity(result.keyword)}
+                      title={isOpportunity ? "Unmark as opportunity" : "Mark as opportunity"}
+                    >
+                      <Star className={`h-4 w-4 ${isOpportunity ? "fill-current" : ""}`} />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1 text-red-500 hover:text-red-600 hover:bg-red-50"
+                      onClick={() => removeResearch(result.keyword)}
+                      title="Remove from saved"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="gap-1"
+                  onClick={() => openDetailsModal(result)}
+                >
+                  <Target className="h-4 w-4" />
+                  Details
+                </Button>
+                <Button 
+                  size="sm" 
+                  className="gap-1"
+                  onClick={() => openBriefModal(result)}
+                >
+                  <Lightbulb className="h-4 w-4" />
+                  Brief
+                </Button>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-start">
@@ -190,13 +549,8 @@ export default function KeywordsPage() {
             Find high-opportunity keywords with demand analysis and opportunity scoring
           </p>
         </div>
-        <Button onClick={fetchTrendingKeywords} variant="outline" className="gap-2">
-          <RefreshCw className="h-4 w-4" />
-          Refresh
-        </Button>
       </div>
 
-      {/* Search Section */}
       <Card>
         <CardContent className="pt-6">
           <div className="flex flex-col sm:flex-row gap-4">
@@ -210,7 +564,6 @@ export default function KeywordsPage() {
                 className="pl-10"
               />
               
-              {/* Autocomplete suggestions */}
               {suggestions.length > 0 && (
                 <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gray-900 border rounded-lg shadow-lg z-10">
                   {suggestions.map((suggestion) => (
@@ -227,28 +580,53 @@ export default function KeywordsPage() {
             </div>
             <Button onClick={handleSearch} disabled={isSearching} className="gap-2">
               {isSearching ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Analyzing...
+                </>
               ) : (
-                <Sparkles className="h-4 w-4" />
+                <>
+                  <Sparkles className="h-4 w-4" />
+                  Analyze
+                </>
               )}
-              Analyze
             </Button>
           </div>
 
-          {/* Trending Keywords as suggestions */}
-          {!hasSearched && trendingKeywords.length > 0 && (
+          <div className="mt-4 flex items-center gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useLiveScraping}
+                onChange={(e) => setUseLiveScraping(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm">
+                Live scraping from Adobe Stock
+                <span className="text-muted-foreground ml-1">(slower but accurate)</span>
+              </span>
+            </label>
+            {useLiveScraping && (
+              <Badge variant="outline" className="text-amber-600 border-amber-600">
+                <Clock className="h-3 w-3 mr-1" />
+                ~30-60 seconds
+              </Badge>
+            )}
+          </div>
+
+          {savedResearches.length > 0 && !hasSearched && (
             <div className="mt-4">
-              <p className="text-sm text-muted-foreground mb-2">Try these trending keywords:</p>
+              <p className="text-sm text-muted-foreground mb-2">Quick access to saved keywords:</p>
               <div className="flex flex-wrap gap-2">
-                {trendingKeywords.slice(0, 8).map((kw) => (
+                {savedResearches.slice(0, 8).map((kw) => (
                   <Badge
                     key={kw.keyword}
                     variant="outline"
                     className="cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors"
                     onClick={() => handleSuggestionClick(kw.keyword)}
                   >
+                    {kw.is_opportunity && <Star className="h-3 w-3 mr-1 fill-amber-500 text-amber-500" />}
                     {kw.keyword}
-                    {kw.trend === "up" && <ArrowUp className="h-3 w-3 ml-1 text-emerald-500" />}
                   </Badge>
                 ))}
               </div>
@@ -257,205 +635,157 @@ export default function KeywordsPage() {
         </CardContent>
       </Card>
 
-      {/* Error Message */}
-      {error && (
-        <Card className="border-red-200 bg-red-50 dark:bg-red-950/20">
-          <CardContent className="pt-6">
-            <p className="text-red-600 dark:text-red-400">{error}</p>
+      {isSearching && (
+        <Card className="border-blue-200 bg-blue-50 dark:bg-blue-950/20">
+          <CardContent className="py-8">
+            <div className="flex flex-col items-center text-center">
+              <div className="relative">
+                <Loader2 className="h-12 w-12 animate-spin text-blue-500" />
+                <Sparkles className="h-5 w-5 text-amber-500 absolute -top-1 -right-1 animate-pulse" />
+              </div>
+              <h3 className="mt-4 font-semibold text-lg">Analyzing &quot;{searchQuery}&quot;</h3>
+              <p className="text-muted-foreground mt-2 max-w-md">
+                {useLiveScraping 
+                  ? "Scraping Adobe Stock for real-time data. This may take 30-60 seconds..."
+                  : "Searching existing data for keyword metrics..."
+                }
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Results */}
-      <AnimatePresence>
-        {hasSearched && results.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="space-y-4"
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-semibold">
-                Results for "{searchQuery}"
-              </h2>
+      {error && (
+        <Card className="border-red-200 bg-red-50 dark:bg-red-950/20">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-red-500" />
+              <p className="text-red-600 dark:text-red-400">{error}</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {hasSearched && !isSearching && results.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold">
+              Results for &quot;{searchQuery}&quot;
+            </h2>
+            <div className="flex items-center gap-2">
+              {results[0]?.source === "live" && (
+                <Badge variant="outline" className="text-emerald-600 border-emerald-600">
+                  <Zap className="h-3 w-3 mr-1" />
+                  Live Data
+                </Badge>
+              )}
               <Badge variant="secondary">{results.length} keywords</Badge>
             </div>
-
-            <div className="grid gap-4">
-              {results.map((result, index) => (
-                <motion.div
-                  key={result.keyword}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.1 }}
-                >
-                  <Card className="hover:border-primary/50 transition-colors">
-                    <CardContent className="pt-6">
-                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-2">
-                            <h3 className="font-semibold text-lg">{result.keyword}</h3>
-                            {result.categories && result.categories.length > 0 && (
-                              <Badge variant="outline">
-                                {result.categories[0]?.name || "General"}
-                              </Badge>
-                            )}
-                            {getTrendIcon(result.trend)}
-                          </div>
-                          
-                          <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
-                            <div className="flex items-center gap-1">
-                              <BarChart3 className="h-4 w-4" />
-                              <span>Results: {formatNumber(result.nb_results)}</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Users className="h-4 w-4" />
-                              <span>Contributors: {result.unique_contributors}</span>
-                            </div>
-                            <div>
-                              Competition: {getCompetitionLabel(result.competition_score)}
-                            </div>
-                            <Badge className={`${getScoreBg(result.demand_score)} text-white`}>
-                              Demand: {result.demand_score.toFixed(0)}
-                            </Badge>
-                          </div>
-
-                          {/* Related searches */}
-                          {result.related_searches && result.related_searches.length > 0 && (
-                            <div className="mt-3 flex flex-wrap gap-1">
-                              <span className="text-xs text-muted-foreground mr-1">Related:</span>
-                              {result.related_searches.slice(0, 5).map((related) => (
-                                <Badge
-                                  key={related}
-                                  variant="secondary"
-                                  className="text-xs cursor-pointer hover:bg-primary hover:text-primary-foreground"
-                                  onClick={() => handleSuggestionClick(related)}
-                                >
-                                  {related}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-6">
-                          <div className="text-center">
-                            <div className="text-sm text-muted-foreground mb-1">
-                              Opportunity Score
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div className="w-20">
-                                <Progress value={result.opportunity_score} className="h-2" />
-                              </div>
-                              <span className={`text-2xl font-bold ${getScoreColor(result.opportunity_score)}`}>
-                                {result.opportunity_score.toFixed(0)}
-                              </span>
-                            </div>
-                            <Badge 
-                              variant="outline" 
-                              className={`mt-1 ${
-                                result.urgency === "high" 
-                                  ? "border-red-500 text-red-500" 
-                                  : result.urgency === "medium"
-                                    ? "border-amber-500 text-amber-500"
-                                    : ""
-                              }`}
-                            >
-                              {result.urgency} urgency
-                            </Badge>
-                          </div>
-
-                          <div className="flex flex-col gap-2">
-                            <Button variant="outline" size="sm" className="gap-1">
-                              <Target className="h-4 w-4" />
-                              Details
-                            </Button>
-                            <Button size="sm" className="gap-1">
-                              <Lightbulb className="h-4 w-4" />
-                              Brief
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </motion.div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Trending Keywords Section */}
-      {!hasSearched && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-emerald-500" />
-            <h2 className="text-xl font-semibold">Trending Keywords</h2>
           </div>
 
-          {loadingTrending ? (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {[1, 2, 3, 4, 5, 6].map((i) => (
-                <Skeleton key={i} className="h-32 rounded-lg" />
-              ))}
+          <div className="grid gap-4">
+            {results.map((result) => renderKeywordCard(result, true, false))}
+          </div>
+        </div>
+      )}
+
+      {!hasSearched && !isSearching && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-4 border-b">
+            <button
+              className={`pb-2 px-1 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === "researched"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setActiveTab("researched")}
+            >
+              <div className="flex items-center gap-2">
+                <Search className="h-4 w-4" />
+                Researched Keywords
+              </div>
+            </button>
+            <button
+              className={`pb-2 px-1 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === "saved"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setActiveTab("saved")}
+            >
+              <div className="flex items-center gap-2">
+                <Bookmark className="h-4 w-4" />
+                Saved Researches
+                {savedResearches.length > 0 && (
+                  <Badge variant="secondary" className="ml-1">
+                    {savedResearches.length}
+                  </Badge>
+                )}
+              </div>
+            </button>
+          </div>
+
+          {activeTab === "researched" && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Hash className="h-5 w-5 text-blue-500" />
+                <h2 className="text-xl font-semibold">Researched Keywords</h2>
+              </div>
+
+              {results.length === 0 ? (
+                <Card>
+                  <CardContent className="py-12 text-center">
+                    <Search className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                    <h3 className="text-lg font-semibold mb-2">No Research Yet</h3>
+                    <p className="text-muted-foreground max-w-md mx-auto">
+                      Search for keywords above to analyze them. Your research results will appear here.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <div className="grid gap-4">
+                  {results.map((result) => renderKeywordCard(result, true, false))}
+                </div>
+              )}
             </div>
-          ) : trendingKeywords.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <Hash className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                <h3 className="text-lg font-semibold mb-2">No Trending Data Yet</h3>
-                <p className="text-muted-foreground max-w-md mx-auto">
-                  Scrape some assets with details enabled to see trending keywords and opportunity scores.
-                </p>
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {trendingKeywords.map((kw, index) => (
-                <motion.div
-                  key={kw.keyword}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                >
-                  <Card 
-                    className="cursor-pointer hover:border-primary/50 transition-all hover:shadow-md"
-                    onClick={() => handleSuggestionClick(kw.keyword)}
-                  >
-                    <CardContent className="pt-6">
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <span className="text-2xl font-bold text-muted-foreground">
-                            {index + 1}
-                          </span>
-                          {getTrendIcon(kw.trend)}
-                        </div>
-                        <div className={`text-2xl font-bold ${getScoreColor(kw.opportunity_score)}`}>
-                          {kw.opportunity_score.toFixed(0)}
-                        </div>
-                      </div>
-                      
-                      <h3 className="font-semibold mb-2">{kw.keyword}</h3>
-                      
-                      <div className="flex items-center justify-between text-sm text-muted-foreground">
-                        <span>{formatNumber(kw.nb_results)} results</span>
-                        <span>{kw.asset_count} assets</span>
-                      </div>
-                      
-                      <Progress value={kw.opportunity_score} className="h-1 mt-3" />
-                    </CardContent>
-                  </Card>
-                </motion.div>
-              ))}
+          )}
+
+          {activeTab === "saved" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Bookmark className="h-5 w-5 text-emerald-500" />
+                  <h2 className="text-xl font-semibold">Saved Researches</h2>
+                </div>
+                {savedResearches.filter(r => r.is_opportunity).length > 0 && (
+                  <Badge className="bg-amber-500 text-white">
+                    <Star className="h-3 w-3 mr-1 fill-current" />
+                    {savedResearches.filter(r => r.is_opportunity).length} Opportunities
+                  </Badge>
+                )}
+              </div>
+
+              {savedResearches.length === 0 ? (
+                <Card>
+                  <CardContent className="py-12 text-center">
+                    <Bookmark className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                    <h3 className="text-lg font-semibold mb-2">No Saved Researches</h3>
+                    <p className="text-muted-foreground max-w-md mx-auto">
+                      When you research a keyword, click the &quot;Save&quot; button to save it here for future reference.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <div className="grid gap-4">
+                  {savedResearches.map((result) => renderKeywordCard(result, false, true))}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Empty State */}
-      {!hasSearched && !loadingTrending && trendingKeywords.length === 0 && (
+      {!hasSearched && savedResearches.length === 0 && results.length === 0 && (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center mb-4">
             <Search className="h-8 w-8 text-primary" />
@@ -467,6 +797,260 @@ export default function KeywordsPage() {
           </p>
         </div>
       )}
+
+      <Modal
+        isOpen={showDetailsModal}
+        onClose={closeDetailsModal}
+        title={`Keyword Details: ${selectedKeyword?.keyword || ""}`}
+      >
+        {selectedKeyword && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {isMarkedAsOpportunity(selectedKeyword.keyword) && (
+                  <Badge className="bg-amber-500 text-white">
+                    <Star className="h-3 w-3 mr-1 fill-current" />
+                    Marked as Opportunity
+                  </Badge>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant={isResearchSaved(selectedKeyword.keyword) ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => isResearchSaved(selectedKeyword.keyword) 
+                    ? removeResearch(selectedKeyword.keyword) 
+                    : saveResearch(selectedKeyword)
+                  }
+                >
+                  {isResearchSaved(selectedKeyword.keyword) ? (
+                    <>
+                      <BookmarkCheck className="h-4 w-4 mr-1 text-emerald-500" />
+                      Saved
+                    </>
+                  ) : (
+                    <>
+                      <Save className="h-4 w-4 mr-1" />
+                      Save Research
+                    </>
+                  )}
+                </Button>
+                {isResearchSaved(selectedKeyword.keyword) && (
+                  <Button
+                    variant={isMarkedAsOpportunity(selectedKeyword.keyword) ? "default" : "outline"}
+                    size="sm"
+                    className={isMarkedAsOpportunity(selectedKeyword.keyword) ? "bg-amber-500 hover:bg-amber-600" : ""}
+                    onClick={() => toggleOpportunity(selectedKeyword.keyword)}
+                  >
+                    <Star className={`h-4 w-4 mr-1 ${isMarkedAsOpportunity(selectedKeyword.keyword) ? "fill-current" : ""}`} />
+                    {isMarkedAsOpportunity(selectedKeyword.keyword) ? "Opportunity" : "Mark Opportunity"}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
+                <div className={`text-3xl font-bold ${getScoreColor(selectedKeyword.opportunity_score)}`}>
+                  {selectedKeyword.opportunity_score.toFixed(0)}
+                </div>
+                <div className="text-sm text-muted-foreground">Opportunity</div>
+              </div>
+              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
+                <div className={`text-3xl font-bold ${getScoreColor(selectedKeyword.demand_score)}`}>
+                  {selectedKeyword.demand_score.toFixed(0)}
+                </div>
+                <div className="text-sm text-muted-foreground">Demand</div>
+              </div>
+              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
+                <div className={`text-3xl font-bold ${getScoreColor(100 - selectedKeyword.competition_score)}`}>
+                  {selectedKeyword.competition_score.toFixed(0)}
+                </div>
+                <div className="text-sm text-muted-foreground">Competition</div>
+              </div>
+              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
+                <div className="text-3xl font-bold text-blue-500">
+                  {selectedKeyword.gap_score.toFixed(0)}
+                </div>
+                <div className="text-sm text-muted-foreground">Gap Score</div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <h4 className="font-semibold">Score Breakdown</h4>
+              <div className="space-y-2">
+                {[
+                  { label: "Demand Score", value: selectedKeyword.demand_score },
+                  { label: "Competition Score", value: selectedKeyword.competition_score },
+                  { label: "Gap Score", value: selectedKeyword.gap_score },
+                  { label: "Freshness Score", value: selectedKeyword.freshness_score },
+                ].map((item) => (
+                  <div key={item.label} className="flex items-center justify-between">
+                    <span className="text-sm">{item.label}</span>
+                    <div className="flex items-center gap-2">
+                      <Progress value={item.value} className="w-32 h-2" />
+                      <span className="text-sm font-medium w-8">{item.value.toFixed(0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-4 rounded-lg border">
+                <div className="flex items-center gap-2 mb-2">
+                  <BarChart3 className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Total Results</span>
+                </div>
+                <div className="text-2xl font-bold">{selectedKeyword.nb_results.toLocaleString()}</div>
+              </div>
+              <div className="p-4 rounded-lg border">
+                <div className="flex items-center gap-2 mb-2">
+                  <Users className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Contributors</span>
+                </div>
+                <div className="text-2xl font-bold">{selectedKeyword.unique_contributors}</div>
+              </div>
+            </div>
+
+            {selectedKeyword.related_searches && selectedKeyword.related_searches.length > 0 && (
+              <div>
+                <h4 className="font-semibold mb-2">Related Keywords</h4>
+                <div className="flex flex-wrap gap-2">
+                  {selectedKeyword.related_searches.map((kw) => (
+                    <Badge key={kw} variant="secondary">{kw}</Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="text-xs text-muted-foreground pt-4 border-t">
+              {selectedKeyword.scraped_at && (
+                <span>Last analyzed: {new Date(selectedKeyword.scraped_at).toLocaleString()}</span>
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={showBriefModal}
+        onClose={closeBriefModal}
+        title={`Content Brief: ${selectedKeyword?.keyword || ""}`}
+      >
+        {selectedKeyword && (
+          <div className="space-y-6">
+            <div className="flex items-center gap-4 p-4 rounded-lg bg-gradient-to-r from-violet-50 to-purple-50 dark:from-violet-950/20 dark:to-purple-950/20">
+              <div className={`text-4xl font-bold ${getScoreColor(selectedKeyword.opportunity_score)}`}>
+                {selectedKeyword.opportunity_score.toFixed(0)}
+              </div>
+              <div>
+                <div className="font-semibold">Opportunity Score</div>
+                <Badge className={getScoreBg(selectedKeyword.opportunity_score) + " text-white"}>
+                  {selectedKeyword.urgency.toUpperCase()} URGENCY
+                </Badge>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-lg border-l-4 border-l-blue-500 bg-blue-50 dark:bg-blue-950/20">
+              <h4 className="font-semibold flex items-center gap-2 mb-2">
+                <CheckCircle className="h-4 w-4 text-blue-500" />
+                Recommendation
+              </h4>
+              <p className="text-sm">
+                {selectedKeyword.opportunity_score >= 70 
+                  ? "This is a HIGH PRIORITY keyword. Create content immediately to capitalize on the opportunity."
+                  : selectedKeyword.opportunity_score >= 50
+                    ? "This is a GOOD OPPORTUNITY. Add to your production queue and create quality content."
+                    : "This keyword has LIMITED OPPORTUNITY. Consider focusing on higher-scoring alternatives."
+                }
+              </p>
+            </div>
+
+            <div>
+              <h4 className="font-semibold flex items-center gap-2 mb-3">
+                <Camera className="h-4 w-4" />
+                Content Ideas
+              </h4>
+              <ul className="space-y-2">
+                {[
+                  `Professional ${selectedKeyword.keyword} photography with clean backgrounds`,
+                  `${selectedKeyword.keyword} in modern, minimalist settings`,
+                  `Diverse people interacting with ${selectedKeyword.keyword}`,
+                  `${selectedKeyword.keyword} lifestyle and workspace shots`,
+                  `Abstract or conceptual ${selectedKeyword.keyword} imagery`,
+                ].map((idea, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm">
+                    <span className="text-primary font-medium">{i + 1}.</span>
+                    <span>{idea}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div>
+              <h4 className="font-semibold flex items-center gap-2 mb-3">
+                <FileText className="h-4 w-4" />
+                Production Tips
+              </h4>
+              <ul className="space-y-2 text-sm">
+                {[
+                  "Focus on unique angles and perspectives not commonly seen",
+                  "Use authentic, diverse models when applicable",
+                  "Ensure high technical quality (lighting, composition, focus)",
+                  "Include both horizontal and vertical orientations",
+                  "Consider seasonal variations if applicable",
+                ].map((tip, i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    <CheckCircle className="h-4 w-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {selectedKeyword.related_searches && selectedKeyword.related_searches.length > 0 && (
+              <div>
+                <h4 className="font-semibold mb-2">Related Keywords to Include</h4>
+                <div className="flex flex-wrap gap-2">
+                  {selectedKeyword.related_searches.slice(0, 8).map((kw) => (
+                    <Badge key={kw} variant="outline">{kw}</Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="pt-4 border-t flex gap-2">
+              <Button onClick={copyBrief} className="flex-1 gap-2">
+                {copiedBrief ? (
+                  <>
+                    <Check className="h-4 w-4" />
+                    Copied to Clipboard!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-4 w-4" />
+                    Copy Full Brief
+                  </>
+                )}
+              </Button>
+              <Button
+                variant={isResearchSaved(selectedKeyword.keyword) ? "secondary" : "outline"}
+                onClick={() => isResearchSaved(selectedKeyword.keyword) 
+                  ? removeResearch(selectedKeyword.keyword) 
+                  : saveResearch(selectedKeyword)
+                }
+              >
+                {isResearchSaved(selectedKeyword.keyword) ? (
+                  <BookmarkCheck className="h-4 w-4 text-emerald-500" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -24,10 +24,30 @@ import {
   Search,
   BarChart3,
   Users,
+  Star,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const SAVED_RESEARCHES_KEY = "sellscope_saved_researches";
+
+interface MarkedOpportunity {
+  keyword: string;
+  nb_results: number;
+  unique_contributors: number;
+  demand_score: number;
+  competition_score: number;
+  gap_score: number;
+  freshness_score: number;
+  opportunity_score: number;
+  trend: string;
+  urgency: string;
+  related_searches: string[];
+  categories: { name: string }[];
+  saved_at: string;
+  is_opportunity: boolean;
+}
 
 interface OpportunityScore {
   keyword: string;
@@ -69,8 +89,40 @@ export default function OpportunitiesPage() {
   const [opportunities, setOpportunities] = useState<OpportunityScore[]>([]);
   const [niches, setNiches] = useState<NicheScore[]>([]);
   const [heatmapData, setHeatmapData] = useState<HeatmapItem[]>([]);
+  const [markedOpportunities, setMarkedOpportunities] = useState<MarkedOpportunity[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  const loadMarkedOpportunities = () => {
+    try {
+      const saved = localStorage.getItem(SAVED_RESEARCHES_KEY);
+      if (saved) {
+        const allSaved = JSON.parse(saved) as MarkedOpportunity[];
+        const marked = allSaved.filter(r => r.is_opportunity);
+        setMarkedOpportunities(marked);
+      }
+    } catch (e) {
+      console.error("Failed to load marked opportunities:", e);
+    }
+  };
+
+  const removeFromOpportunities = (keyword: string) => {
+    try {
+      const saved = localStorage.getItem(SAVED_RESEARCHES_KEY);
+      if (saved) {
+        const allSaved = JSON.parse(saved) as MarkedOpportunity[];
+        const updated = allSaved.map(r => 
+          r.keyword.toLowerCase() === keyword.toLowerCase()
+            ? { ...r, is_opportunity: false }
+            : r
+        );
+        localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(updated));
+        setMarkedOpportunities(updated.filter(r => r.is_opportunity));
+      }
+    } catch (e) {
+      console.error("Failed to remove from opportunities:", e);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -103,11 +155,19 @@ export default function OpportunitiesPage() {
   const refreshScores = async () => {
     setRefreshing(true);
     await fetchData();
+    loadMarkedOpportunities();
     setRefreshing(false);
   };
 
   useEffect(() => {
     fetchData();
+    loadMarkedOpportunities();
+    
+    const handleStorageChange = () => {
+      loadMarkedOpportunities();
+    };
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
   const getTrendIcon = (trend: string) => {
@@ -184,8 +244,17 @@ export default function OpportunitiesPage() {
         </div>
       </div>
 
-      <Tabs defaultValue="list" className="space-y-6">
+      <Tabs defaultValue="marked" className="space-y-6">
         <TabsList>
+          <TabsTrigger value="marked" className="gap-2">
+            <Star className="h-4 w-4" />
+            Marked Opportunities
+            {markedOpportunities.length > 0 && (
+              <Badge variant="secondary" className="ml-1">
+                {markedOpportunities.length}
+              </Badge>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="list" className="gap-2">
             <Target className="h-4 w-4" />
             Top Opportunities
@@ -199,6 +268,169 @@ export default function OpportunitiesPage() {
             Niches
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="marked" className="space-y-4">
+          {markedOpportunities.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center">
+                <Star className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                <h3 className="text-lg font-semibold mb-2">No Marked Opportunities</h3>
+                <p className="text-muted-foreground max-w-md mx-auto mb-4">
+                  When you research keywords, click the star icon to mark them as opportunities. 
+                  They will appear here for quick access.
+                </p>
+                <Link href="/dashboard/keywords">
+                  <Button className="gap-2">
+                    <Search className="h-4 w-4" />
+                    Start Keyword Research
+                  </Button>
+                </Link>
+              </CardContent>
+            </Card>
+          ) : (
+            <AnimatePresence>
+              {markedOpportunities.map((opp, index) => (
+                <motion.div
+                  key={opp.keyword}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -100 }}
+                  transition={{ delay: index * 0.05 }}
+                >
+                  <Card className="hover:border-primary/50 transition-colors border-amber-500/30 bg-amber-500/5">
+                    <CardContent className="pt-6">
+                      <div className="flex flex-col xl:flex-row gap-6">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20 text-amber-500">
+                              <Star className="h-5 w-5 fill-current" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <h3 className="font-semibold text-lg">{opp.keyword}</h3>
+                                {getTrendIcon(opp.trend)}
+                              </div>
+                              <div className="flex items-center gap-2 mt-1">
+                                {opp.categories && opp.categories.length > 0 && (
+                                  <Badge variant="outline">
+                                    {opp.categories[0]?.name || "General"}
+                                  </Badge>
+                                )}
+                                <Badge
+                                  variant={
+                                    opp.urgency === "high"
+                                      ? "default"
+                                      : opp.urgency === "medium"
+                                        ? "secondary"
+                                        : "outline"
+                                  }
+                                  className={
+                                    opp.urgency === "high"
+                                      ? "bg-red-500"
+                                      : opp.urgency === "medium"
+                                        ? "bg-amber-500"
+                                        : ""
+                                  }
+                                >
+                                  <Clock className="h-3 w-3 mr-1" />
+                                  {opp.urgency} urgency
+                                </Badge>
+                                <span className="text-xs text-muted-foreground">
+                                  Saved {new Date(opp.saved_at).toLocaleDateString()}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap gap-4 text-sm text-muted-foreground mb-4">
+                            <div className="flex items-center gap-1">
+                              <BarChart3 className="h-4 w-4" />
+                              <span>{formatNumber(opp.nb_results)} results</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Users className="h-4 w-4" />
+                              <span>{opp.unique_contributors} contributors</span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Demand</div>
+                              <div className="flex items-center gap-2">
+                                <Progress value={opp.demand_score} className="h-1.5 flex-1" />
+                                <span className="text-xs font-medium">{opp.demand_score.toFixed(0)}</span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Competition</div>
+                              <div className="flex items-center gap-2">
+                                <Progress value={opp.competition_score} className="h-1.5 flex-1" />
+                                <span className="text-xs font-medium">{opp.competition_score.toFixed(0)}</span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Gap</div>
+                              <div className="flex items-center gap-2">
+                                <Progress value={opp.gap_score} className="h-1.5 flex-1" />
+                                <span className="text-xs font-medium">{opp.gap_score.toFixed(0)}</span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-muted-foreground mb-1">Freshness</div>
+                              <div className="flex items-center gap-2">
+                                <Progress value={opp.freshness_score} className="h-1.5 flex-1" />
+                                <span className="text-xs font-medium">{opp.freshness_score.toFixed(0)}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {opp.related_searches && opp.related_searches.length > 0 && (
+                            <div className="mt-3 flex flex-wrap gap-1">
+                              <span className="text-xs text-muted-foreground mr-1">Related:</span>
+                              {opp.related_searches.slice(0, 4).map((related) => (
+                                <Badge key={related} variant="secondary" className="text-xs">
+                                  {related}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex flex-row xl:flex-col items-center justify-between xl:justify-center gap-4 xl:w-48">
+                          <div className="text-center">
+                            <div className="text-sm text-muted-foreground mb-1">
+                              Opportunity Score
+                            </div>
+                            <div className={`text-4xl font-bold ${getScoreColor(opp.opportunity_score)}`}>
+                              {opp.opportunity_score.toFixed(0)}
+                            </div>
+                          </div>
+                          <div className="flex xl:flex-col gap-2">
+                            <Link href={`/dashboard/keywords?q=${encodeURIComponent(opp.keyword)}`}>
+                              <Button variant="outline" size="sm" className="gap-1">
+                                <TrendingUp className="h-4 w-4" />
+                                Analyze
+                              </Button>
+                            </Link>
+                            <Button 
+                              variant="outline" 
+                              size="sm" 
+                              className="gap-1 text-red-500 hover:text-red-600 hover:bg-red-50"
+                              onClick={() => removeFromOpportunities(opp.keyword)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Remove
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          )}
+        </TabsContent>
 
         <TabsContent value="list" className="space-y-4">
           {opportunities.length === 0 ? (

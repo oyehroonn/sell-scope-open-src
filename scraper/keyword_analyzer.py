@@ -153,25 +153,82 @@ class KeywordAnalyzer:
     def _extract_total_results(self) -> int:
         """Extract total number of results from the page"""
         try:
+            # First try to find specific elements that show result count
+            selectors = [
+                "[data-testid='search-results-count']",
+                "[class*='ResultsCount']",
+                "[class*='results-count']",
+                "[class*='SearchHeader'] span",
+                "h1[class*='Search']",
+            ]
+            
+            for selector in selectors:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                for el in elements:
+                    text = el.text
+                    # Look for numbers in the text
+                    match = re.search(r'([\d,\.]+)\s*(?:results?|resultados?|résultats?|assets?|images?|photos?|stock)', text, re.IGNORECASE)
+                    if match:
+                        count_str = match.group(1).replace(",", "").replace(".", "")
+                        count = int(count_str)
+                        if count > 0:
+                            return count
+            
+            # Try page text patterns
             page_text = self.driver.find_element(By.TAG_NAME, "body").text
             
             patterns = [
-                r'([\d,]+)\s*(?:results?|resultados?|résultats?)',
+                r'([\d,]+)\s*(?:results?|resultados?|résultats?)\s*(?:for|para|pour)?',
                 r'(?:of|de)\s*([\d,]+)\s*(?:results?|assets?)',
                 r'([\d,]+)\s*(?:stock|assets?|images?|photos?)',
                 r'Showing\s+\d+[-–]\d+\s+of\s+([\d,]+)',
+                r'([\d,]+)\s+(?:free|premium)?\s*(?:stock)',
+                r'(?:Found|Encontrado|Trouvé)\s*([\d,]+)',
             ]
             
             for pattern in patterns:
                 match = re.search(pattern, page_text, re.IGNORECASE)
                 if match:
                     count_str = match.group(1).replace(",", "").replace(".", "")
-                    return int(count_str)
+                    count = int(count_str)
+                    if count > 100:  # Reasonable minimum
+                        return count
             
-            # Fallback: count visible items and estimate
+            # Try to extract from page source/scripts
+            try:
+                page_source = self.driver.page_source
+                # Look for JSON data in scripts
+                json_patterns = [
+                    r'"nb_results":\s*(\d+)',
+                    r'"totalResults":\s*(\d+)',
+                    r'"total_count":\s*(\d+)',
+                    r'"count":\s*(\d+)',
+                ]
+                for pattern in json_patterns:
+                    match = re.search(pattern, page_source)
+                    if match:
+                        count = int(match.group(1))
+                        if count > 100:
+                            return count
+            except:
+                pass
+            
+            # Fallback: count visible items and estimate based on pagination
             items = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='search-result-item'], [class*='AssetCard'], a[href*='/images/']")
             if items:
-                return len(items) * 10  # Rough estimate
+                # Check for pagination to estimate total
+                pagination = self.driver.find_elements(By.CSS_SELECTOR, "[class*='Pagination'] a, [class*='pagination'] a")
+                if pagination:
+                    # Try to find the last page number
+                    max_page = 1
+                    for p in pagination:
+                        try:
+                            page_num = int(p.text)
+                            max_page = max(max_page, page_num)
+                        except:
+                            pass
+                    return len(items) * max_page
+                return len(items) * 100  # Estimate 100 pages minimum for popular terms
             
         except Exception as e:
             logger.warning(f"Could not extract total results: {e}")
@@ -257,24 +314,35 @@ class KeywordAnalyzer:
         return categories[:10]
     
     def _extract_top_results(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Extract top search results"""
+        """Extract top search results with contributor info"""
         results = []
         
         try:
+            # Scroll to load more items
+            for _ in range(3):
+                self.driver.execute_script("window.scrollBy(0, 800)")
+                time.sleep(0.5)
+            
+            # Try multiple selectors for result items
             selectors = [
                 "[data-testid='search-result-item']",
                 "[class*='AssetCard']",
                 "[class*='SearchResultItem']",
+                "div[class*='search-result']",
+                "figure[class*='asset']",
             ]
             
             items = []
             for selector in selectors:
                 items = self.driver.find_elements(By.CSS_SELECTOR, selector)
                 if items:
+                    logger.info(f"Found {len(items)} items with selector: {selector}")
                     break
             
             if not items:
+                # Fallback: find all image links
                 items = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/images/']")
+                logger.info(f"Fallback: found {len(items)} image links")
             
             for item in items[:limit]:
                 try:
@@ -284,10 +352,74 @@ class KeywordAnalyzer:
                 except Exception as e:
                     continue
             
+            # If we didn't get contributors from cards, try to extract from page
+            if results and all(r.get("contributor_id") is None for r in results):
+                logger.info("No contributors found in cards, trying page-level extraction")
+                contributors = self._extract_contributors_from_page()
+                # Assign contributors to results (best effort)
+                for i, contrib in enumerate(contributors[:len(results)]):
+                    if i < len(results):
+                        results[i]["contributor_id"] = contrib.get("id")
+                        results[i]["contributor_name"] = contrib.get("name")
+            
         except Exception as e:
             logger.warning(f"Could not extract top results: {e}")
         
         return results
+    
+    def _extract_contributors_from_page(self) -> List[Dict[str, Any]]:
+        """Extract contributor information from the entire page"""
+        contributors = []
+        seen_ids = set()
+        
+        try:
+            # Look for contributor links anywhere on page
+            selectors = [
+                "a[href*='/contributor/']",
+                "[class*='contributor'] a",
+                "[class*='author'] a",
+                "[class*='Creator'] a",
+            ]
+            
+            for selector in selectors:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                for el in elements[:50]:
+                    try:
+                        href = el.get_attribute("href") or ""
+                        match = re.search(r'/contributor/(\d+)', href)
+                        if match:
+                            contrib_id = match.group(1)
+                            if contrib_id not in seen_ids:
+                                seen_ids.add(contrib_id)
+                                contributors.append({
+                                    "id": contrib_id,
+                                    "name": el.text.strip() or None,
+                                })
+                    except:
+                        continue
+            
+            # Also try to extract from page source
+            if not contributors:
+                page_source = self.driver.page_source
+                # Look for contributor IDs in JSON data
+                contrib_matches = re.findall(r'"creator_id":\s*"?(\d+)"?', page_source)
+                for cid in contrib_matches[:30]:
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        contributors.append({"id": cid, "name": None})
+                
+                # Also try contributor patterns
+                contrib_matches = re.findall(r'/contributor/(\d+)', page_source)
+                for cid in contrib_matches[:30]:
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        contributors.append({"id": cid, "name": None})
+            
+        except Exception as e:
+            logger.warning(f"Could not extract contributors from page: {e}")
+        
+        logger.info(f"Extracted {len(contributors)} unique contributors from page")
+        return contributors
     
     def _parse_result_item(self, item) -> Dict[str, Any]:
         """Parse a single search result item"""
@@ -317,25 +449,42 @@ class KeywordAnalyzer:
                 if match:
                     result["asset_id"] = match.group(1)
             
+            # Also try data attributes
+            if not result["asset_id"]:
+                data_id = item.get_attribute("data-asset-id") or item.get_attribute("data-id")
+                if data_id:
+                    result["asset_id"] = data_id
+            
             # Get title from image alt
             imgs = item.find_elements(By.CSS_SELECTOR, "img")
             for img in imgs:
                 alt = img.get_attribute("alt") or ""
                 if alt and len(alt) > 2:
                     result["title"] = alt
-                    break
                 src = img.get_attribute("src") or ""
                 if src and "ftcdn" in src:
                     result["thumbnail_url"] = src
+                if result["title"]:
+                    break
             
-            # Get contributor
-            contrib_links = item.find_elements(By.CSS_SELECTOR, "a[href*='/contributor/']")
-            for link in contrib_links:
-                href = link.get_attribute("href") or ""
-                match = re.search(r'/contributor/(\d+)', href)
-                if match:
-                    result["contributor_id"] = match.group(1)
-                    result["contributor_name"] = link.text.strip() or None
+            # Get contributor - try multiple selectors
+            contrib_selectors = [
+                "a[href*='/contributor/']",
+                "[class*='contributor'] a",
+                "[class*='author'] a",
+                "[class*='creator'] a",
+            ]
+            
+            for selector in contrib_selectors:
+                contrib_links = item.find_elements(By.CSS_SELECTOR, selector)
+                for link in contrib_links:
+                    href = link.get_attribute("href") or ""
+                    match = re.search(r'/contributor/(\d+)', href)
+                    if match:
+                        result["contributor_id"] = match.group(1)
+                        result["contributor_name"] = link.text.strip() or None
+                        break
+                if result["contributor_id"]:
                     break
             
             # Check premium
@@ -367,11 +516,20 @@ class KeywordAnalyzer:
         # Get metrics sorted by downloads (popularity)
         downloads_metrics = self.get_search_metrics(keyword, sort_order="nb_downloads")
         
+        # Use the maximum nb_results from both searches (more accurate)
+        nb_results = max(relevance_metrics["nb_results"], downloads_metrics["nb_results"])
+        
+        # Combine unique contributors from both searches
+        unique_contributors = max(
+            relevance_metrics["unique_contributors"],
+            downloads_metrics["unique_contributors"]
+        )
+        
         # Calculate opportunity score
         analysis = {
             "keyword": keyword,
-            "nb_results": relevance_metrics["nb_results"],
-            "unique_contributors": relevance_metrics["unique_contributors"],
+            "nb_results": nb_results,
+            "unique_contributors": unique_contributors,
             "related_searches": relevance_metrics["related_searches"],
             "categories": relevance_metrics["categories"],
             "top_results_relevance": relevance_metrics["top_results"][:10],
@@ -386,57 +544,153 @@ class KeywordAnalyzer:
         return analysis
     
     def _calculate_scores(self, analysis: Dict[str, Any]) -> Dict[str, float]:
-        """Calculate demand, competition, and opportunity scores"""
+        """
+        Calculate demand, competition, and opportunity scores.
+        
+        Scoring methodology:
+        - Demand Score: Based on total results (market size/interest)
+        - Competition Score: Based on market saturation (results per contributor ratio)
+        - Gap Score: Based on diversity of contributors (opportunity for new entrants)
+        - Freshness Score: Placeholder for content age analysis
+        - Opportunity Score: Weighted combination favoring high demand + low competition
+        """
         nb_results = analysis.get("nb_results", 0)
         unique_contributors = analysis.get("unique_contributors", 0)
+        top_results = analysis.get("top_results_relevance", []) or analysis.get("top_results", [])
         
-        # Demand Score (0-100): Based on number of results
-        # 0-1000 = low, 1000-10000 = medium, 10000+ = high
-        if nb_results >= 100000:
-            demand_score = 100
+        # ===== DEMAND SCORE (0-100) =====
+        # Based on total results - indicates market interest/search volume
+        # Adobe Stock typically has:
+        # - Niche keywords: 100-10,000 results
+        # - Popular keywords: 10,000-100,000 results  
+        # - Very popular: 100,000-1,000,000 results
+        # - Mega popular: 1,000,000+ results
+        if nb_results >= 1000000:
+            demand_score = 95 + min((nb_results - 1000000) / 10000000 * 5, 5)  # 95-100
+        elif nb_results >= 100000:
+            demand_score = 80 + (nb_results - 100000) / 900000 * 15  # 80-95
         elif nb_results >= 10000:
-            demand_score = 70 + (min(nb_results, 100000) - 10000) / 90000 * 30
+            demand_score = 60 + (nb_results - 10000) / 90000 * 20  # 60-80
         elif nb_results >= 1000:
-            demand_score = 40 + (nb_results - 1000) / 9000 * 30
+            demand_score = 40 + (nb_results - 1000) / 9000 * 20  # 40-60
+        elif nb_results >= 100:
+            demand_score = 20 + (nb_results - 100) / 900 * 20  # 20-40
+        elif nb_results > 0:
+            demand_score = nb_results / 100 * 20  # 0-20
         else:
-            demand_score = nb_results / 1000 * 40
+            demand_score = 0
         
-        # Competition Score (0-100): Based on unique contributors
-        # Fewer contributors = less competition = higher opportunity
-        if unique_contributors == 0:
+        # ===== COMPETITION SCORE (0-100) =====
+        # Based on market saturation - how crowded is this keyword?
+        # Higher score = MORE competition = HARDER to rank
+        # 
+        # We estimate competition by:
+        # 1. Total results (more = more competitive)
+        # 2. Contributor diversity in top results (fewer unique = dominated by few)
+        # 3. Results per contributor ratio
+        
+        if nb_results == 0:
             competition_score = 0
-        elif unique_contributors >= 100:
-            competition_score = 100
         else:
-            competition_score = unique_contributors
+            # Base competition from total results
+            if nb_results >= 1000000:
+                base_competition = 90 + min((nb_results - 1000000) / 10000000 * 10, 10)  # 90-100
+            elif nb_results >= 100000:
+                base_competition = 70 + (nb_results - 100000) / 900000 * 20  # 70-90
+            elif nb_results >= 10000:
+                base_competition = 50 + (nb_results - 10000) / 90000 * 20  # 50-70
+            elif nb_results >= 1000:
+                base_competition = 30 + (nb_results - 1000) / 9000 * 20  # 30-50
+            elif nb_results >= 100:
+                base_competition = 10 + (nb_results - 100) / 900 * 20  # 10-30
+            else:
+                base_competition = nb_results / 100 * 10  # 0-10
+            
+            # Adjust based on contributor diversity in top results
+            # If top 20 results are from many different contributors = more competitive
+            # If dominated by few contributors = less competitive (opportunity to compete)
+            if unique_contributors > 0:
+                sample_size = min(len(top_results), 20)
+                if sample_size > 0:
+                    # Diversity ratio: unique contributors / sample size
+                    diversity = unique_contributors / sample_size
+                    # High diversity (0.8-1.0) = very competitive
+                    # Low diversity (0.1-0.3) = dominated by few, opportunity exists
+                    diversity_factor = diversity * 20  # 0-20 adjustment
+                    competition_score = base_competition * 0.7 + diversity_factor * 0.3 + 10
+                else:
+                    competition_score = base_competition
+            else:
+                # No contributor data, use base only
+                competition_score = base_competition
+            
+            competition_score = min(100, max(0, competition_score))
         
-        # Gap Score (0-100): Placeholder - would need quality analysis
-        gap_score = 50
+        # ===== GAP SCORE (0-100) =====
+        # Opportunity gap - is there room for new content?
+        # Higher score = more opportunity
+        # Based on inverse of competition and contributor concentration
+        if unique_contributors > 0 and len(top_results) > 0:
+            # Concentration = unique contributors / sample size
+            # Low concentration (few contributors dominate) = HIGH gap (opportunity)
+            # High concentration (many contributors) = LOW gap (saturated)
+            concentration = min(unique_contributors / max(len(top_results), 1), 1.0)
+            
+            if concentration < 0.3:  # Highly concentrated - few dominate
+                gap_score = 70 + (0.3 - concentration) / 0.3 * 30  # 70-100
+            elif concentration < 0.5:
+                gap_score = 50 + (0.5 - concentration) / 0.2 * 20  # 50-70
+            elif concentration < 0.7:
+                gap_score = 35 + (0.7 - concentration) / 0.2 * 15  # 35-50
+            else:
+                # High concentration - many contributors, saturated
+                gap_score = 20 + (1.0 - concentration) / 0.3 * 15  # 20-35
+            
+            gap_score = max(10, min(100, gap_score))  # Clamp to 10-100
+        else:
+            # No data, assume moderate gap
+            gap_score = 50
         
-        # Freshness Score (0-100): Placeholder - would need date analysis
-        freshness_score = 50
+        # ===== FRESHNESS SCORE (0-100) =====
+        # Would need upload date analysis - placeholder
+        # For now, estimate based on demand (trending topics get fresh content)
+        if demand_score >= 80:
+            freshness_score = 60  # High demand = lots of fresh content
+        elif demand_score >= 50:
+            freshness_score = 50  # Moderate
+        else:
+            freshness_score = 40  # Low demand = stale content, opportunity
         
-        # Opportunity Score: Weighted combination
-        # High demand + low competition = high opportunity
+        # ===== OPPORTUNITY SCORE (0-100) =====
+        # Weighted combination: High demand + Low competition = High opportunity
+        # 
+        # Formula emphasizes:
+        # - Demand (35%): Want keywords people are searching for
+        # - Inverse Competition (30%): Want less saturated markets
+        # - Gap (20%): Want markets with room for new content
+        # - Freshness (15%): Slight preference for active markets
         opportunity_score = (
             demand_score * 0.35 +
-            (100 - competition_score) * 0.25 +
+            (100 - competition_score) * 0.30 +
             gap_score * 0.20 +
-            freshness_score * 0.20
+            freshness_score * 0.15
         )
         
-        # Determine trend based on demand level
-        if demand_score >= 70:
+        # ===== TREND DETERMINATION =====
+        # Based on demand level relative to competition
+        demand_competition_ratio = demand_score / max(competition_score, 1)
+        if demand_competition_ratio > 1.2 and demand_score >= 60:
             trend = "up"
-        elif demand_score >= 40:
-            trend = "stable"
-        else:
+        elif demand_competition_ratio < 0.8 or demand_score < 30:
             trend = "down"
+        else:
+            trend = "stable"
         
-        # Determine urgency
-        if opportunity_score >= 75:
+        # ===== URGENCY DETERMINATION =====
+        # Based on opportunity score
+        if opportunity_score >= 70:
             urgency = "high"
-        elif opportunity_score >= 50:
+        elif opportunity_score >= 45:
             urgency = "medium"
         else:
             urgency = "low"

@@ -71,11 +71,16 @@ async def analyze_keyword(
         store = get_store()
         
         if live:
+            # Run live scraping from Adobe Stock
             result = await analyze_keyword_live(keyword, headless=True)
-            if not result.get("error"):
+            
+            # Store the results even if there was an error (for caching)
+            if result.get("nb_results", 0) > 0 or result.get("opportunity_score", 0) > 0:
                 store.upsert_keyword_metrics(result)
+            
             return KeywordAnalysis(**result)
         
+        # Use cached/scraped data
         result = analyze_keyword_from_scraped_data(keyword, store)
         return KeywordAnalysis(**result)
     

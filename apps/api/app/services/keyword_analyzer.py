@@ -25,57 +25,112 @@ def _get_scraper_dir() -> Path:
 def _calculate_opportunity_score(
     nb_results: int,
     unique_contributors: int,
-    gap_score: float = 50,
-    freshness_score: float = 50,
+    sample_size: int = 20,
+    gap_score: float = None,
+    freshness_score: float = None,
 ) -> Dict[str, Any]:
     """
     Calculate opportunity scores based on demand and competition metrics.
     
-    Formula:
-    - Demand Score: Based on nb_results (more results = more demand)
-    - Competition Score: Based on unique contributors (more = higher competition)
-    - Opportunity = (Demand * 0.35) + (100 - Competition) * 0.25 + Gap * 0.20 + Freshness * 0.20
+    Scoring methodology:
+    - Demand Score: Based on total results (market size/interest)
+    - Competition Score: Based on market saturation (results volume + contributor diversity)
+    - Gap Score: Based on diversity of contributors (opportunity for new entrants)
+    - Freshness Score: Estimated based on demand patterns
+    - Opportunity Score: Weighted combination favoring high demand + low competition
     """
-    # Demand Score (0-100): Based on number of results
-    if nb_results >= 100000:
-        demand_score = 100
+    # ===== DEMAND SCORE (0-100) =====
+    # Based on total results - indicates market interest/search volume
+    if nb_results >= 1000000:
+        demand_score = 95 + min((nb_results - 1000000) / 10000000 * 5, 5)  # 95-100
+    elif nb_results >= 100000:
+        demand_score = 80 + (nb_results - 100000) / 900000 * 15  # 80-95
     elif nb_results >= 10000:
-        demand_score = 70 + (min(nb_results, 100000) - 10000) / 90000 * 30
+        demand_score = 60 + (nb_results - 10000) / 90000 * 20  # 60-80
     elif nb_results >= 1000:
-        demand_score = 40 + (nb_results - 1000) / 9000 * 30
+        demand_score = 40 + (nb_results - 1000) / 9000 * 20  # 40-60
+    elif nb_results >= 100:
+        demand_score = 20 + (nb_results - 100) / 900 * 20  # 20-40
     elif nb_results > 0:
-        demand_score = nb_results / 1000 * 40
+        demand_score = nb_results / 100 * 20  # 0-20
     else:
         demand_score = 0
     
-    # Competition Score (0-100): Based on unique contributors
-    if unique_contributors == 0:
+    # ===== COMPETITION SCORE (0-100) =====
+    # Based on market saturation - higher = more competitive = harder to rank
+    if nb_results == 0:
         competition_score = 0
-    elif unique_contributors >= 100:
-        competition_score = 100
     else:
-        competition_score = unique_contributors
+        # Base competition from total results
+        if nb_results >= 1000000:
+            base_competition = 90 + min((nb_results - 1000000) / 10000000 * 10, 10)  # 90-100
+        elif nb_results >= 100000:
+            base_competition = 70 + (nb_results - 100000) / 900000 * 20  # 70-90
+        elif nb_results >= 10000:
+            base_competition = 50 + (nb_results - 10000) / 90000 * 20  # 50-70
+        elif nb_results >= 1000:
+            base_competition = 30 + (nb_results - 1000) / 9000 * 20  # 30-50
+        elif nb_results >= 100:
+            base_competition = 10 + (nb_results - 100) / 900 * 20  # 10-30
+        else:
+            base_competition = nb_results / 100 * 10  # 0-10
+        
+        # Adjust based on contributor diversity
+        if unique_contributors > 0 and sample_size > 0:
+            diversity = unique_contributors / sample_size
+            diversity_factor = diversity * 20
+            competition_score = base_competition * 0.7 + diversity_factor * 0.3 + 10
+        else:
+            competition_score = base_competition
+        
+        competition_score = min(100, max(0, competition_score))
     
-    # Opportunity Score: Weighted combination
+    # ===== GAP SCORE (0-100) =====
+    if gap_score is None:
+        if unique_contributors > 0 and sample_size > 0:
+            concentration = min(unique_contributors / sample_size, 1.0)
+            if concentration < 0.3:
+                gap_score = 70 + (0.3 - concentration) / 0.3 * 30
+            elif concentration < 0.5:
+                gap_score = 50 + (0.5 - concentration) / 0.2 * 20
+            elif concentration < 0.7:
+                gap_score = 35 + (0.7 - concentration) / 0.2 * 15
+            else:
+                gap_score = 20 + (1.0 - concentration) / 0.3 * 15
+            gap_score = max(10, min(100, gap_score))
+        else:
+            gap_score = 50
+    
+    # ===== FRESHNESS SCORE (0-100) =====
+    if freshness_score is None:
+        if demand_score >= 80:
+            freshness_score = 60
+        elif demand_score >= 50:
+            freshness_score = 50
+        else:
+            freshness_score = 40
+    
+    # ===== OPPORTUNITY SCORE (0-100) =====
     opportunity_score = (
         demand_score * 0.35 +
-        (100 - competition_score) * 0.25 +
+        (100 - competition_score) * 0.30 +
         gap_score * 0.20 +
-        freshness_score * 0.20
+        freshness_score * 0.15
     )
     
-    # Determine trend based on demand level
-    if demand_score >= 70:
+    # ===== TREND DETERMINATION =====
+    demand_competition_ratio = demand_score / max(competition_score, 1)
+    if demand_competition_ratio > 1.2 and demand_score >= 60:
         trend = "up"
-    elif demand_score >= 40:
-        trend = "stable"
-    else:
+    elif demand_competition_ratio < 0.8 or demand_score < 30:
         trend = "down"
+    else:
+        trend = "stable"
     
-    # Determine urgency
-    if opportunity_score >= 75:
+    # ===== URGENCY DETERMINATION =====
+    if opportunity_score >= 70:
         urgency = "high"
-    elif opportunity_score >= 50:
+    elif opportunity_score >= 45:
         urgency = "medium"
     else:
         urgency = "low"
@@ -103,15 +158,34 @@ async def analyze_keyword_live(keyword: str, headless: bool = True) -> Dict[str,
         return {
             "keyword": keyword,
             "error": "Scraper directory not found",
+            "nb_results": 0,
+            "unique_contributors": 0,
+            "demand_score": 0,
+            "competition_score": 0,
+            "gap_score": 50,
+            "freshness_score": 50,
+            "opportunity_score": 25,
+            "trend": "stable",
+            "urgency": "low",
+            "related_searches": [],
+            "categories": [],
             "scraped_at": datetime.utcnow().isoformat(),
+            "source": "error",
         }
     
     try:
+        # Ensure output directory exists
+        output_dir = scraper_dir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        safe_keyword = keyword.replace(' ', '_').replace('/', '_').replace('\\', '_')
+        output_file = output_dir / f"keyword_analysis_{safe_keyword}.json"
+        
         cmd = [
             sys.executable or "python3",
             "keyword_analyzer.py",
             keyword,
-            "-o", f"output/keyword_analysis_{keyword.replace(' ', '_')}.json",
+            "-o", str(output_file),
         ]
         if headless:
             cmd.append("--headless")
@@ -124,35 +198,89 @@ async def analyze_keyword_live(keyword: str, headless: bool = True) -> Dict[str,
             cwd=str(scraper_dir),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,  # Increased timeout
         )
         
-        output_file = scraper_dir / "output" / f"keyword_analysis_{keyword.replace(' ', '_')}.json"
         if output_file.exists():
             with open(output_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
-                    return data[0]
-                return data
+                    result_data = data[0]
+                else:
+                    result_data = data
+                
+                # Ensure all required fields exist
+                result_data.setdefault("keyword", keyword)
+                result_data.setdefault("nb_results", 0)
+                result_data.setdefault("unique_contributors", 0)
+                result_data.setdefault("demand_score", 0)
+                result_data.setdefault("competition_score", 0)
+                result_data.setdefault("gap_score", 50)
+                result_data.setdefault("freshness_score", 50)
+                result_data.setdefault("opportunity_score", 0)
+                result_data.setdefault("trend", "stable")
+                result_data.setdefault("urgency", "medium")
+                result_data.setdefault("related_searches", [])
+                result_data.setdefault("categories", [])
+                result_data["source"] = "live"
+                
+                return result_data
         
+        # If output file not found, return error with default values
         return {
             "keyword": keyword,
             "error": "Analysis output not found",
             "stderr": result.stderr[:500] if result.stderr else None,
+            "nb_results": 0,
+            "unique_contributors": 0,
+            "demand_score": 0,
+            "competition_score": 0,
+            "gap_score": 50,
+            "freshness_score": 50,
+            "opportunity_score": 25,
+            "trend": "stable",
+            "urgency": "low",
+            "related_searches": [],
+            "categories": [],
             "scraped_at": datetime.utcnow().isoformat(),
+            "source": "error",
         }
         
     except subprocess.TimeoutExpired:
         return {
             "keyword": keyword,
-            "error": "Analysis timed out",
+            "error": "Analysis timed out - try again or use cached data",
+            "nb_results": 0,
+            "unique_contributors": 0,
+            "demand_score": 0,
+            "competition_score": 0,
+            "gap_score": 50,
+            "freshness_score": 50,
+            "opportunity_score": 25,
+            "trend": "stable",
+            "urgency": "low",
+            "related_searches": [],
+            "categories": [],
             "scraped_at": datetime.utcnow().isoformat(),
+            "source": "timeout",
         }
     except Exception as e:
         return {
             "keyword": keyword,
             "error": str(e),
+            "nb_results": 0,
+            "unique_contributors": 0,
+            "demand_score": 0,
+            "competition_score": 0,
+            "gap_score": 50,
+            "freshness_score": 50,
+            "opportunity_score": 25,
+            "trend": "stable",
+            "urgency": "low",
+            "related_searches": [],
+            "categories": [],
             "scraped_at": datetime.utcnow().isoformat(),
+            "source": "error",
         }
 
 
