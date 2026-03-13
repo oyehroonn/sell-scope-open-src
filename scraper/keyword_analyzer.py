@@ -799,6 +799,44 @@ def analyze_keywords_batch(keywords: List[str], output_file: str = None, headles
         return results
 
 
+def analyze_keyword_deep(
+    keyword: str,
+    depth: str = "medium",
+    output_file: str = None,
+    headless: bool = True,
+    progress_callback = None,
+) -> Dict[str, Any]:
+    """
+    Run deep analysis on a keyword using the DeepAnalyzer.
+    
+    This is a convenience function that imports and uses the DeepAnalyzer
+    for comprehensive multi-page scraping and analysis.
+    
+    Args:
+        keyword: Keyword to analyze
+        depth: Analysis depth (simple, medium, deep)
+        output_file: Optional output JSON file
+        headless: Run browser in headless mode
+        progress_callback: Optional callback for progress updates
+    
+    Returns:
+        Comprehensive analysis results with market data, 
+        contributor profiles, and visualization data
+    """
+    from deep_analyzer import DeepAnalyzer
+    
+    with DeepAnalyzer(headless=headless, progress_callback=progress_callback) as analyzer:
+        results = analyzer.analyze_keyword_deep(keyword, depth)
+        
+        if output_file:
+            os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+            logger.info(f"Deep analysis results saved to {output_file}")
+        
+        return results
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -807,24 +845,74 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", help="Output JSON file")
     parser.add_argument("--headless", action="store_true", default=True, help="Run in headless mode")
     parser.add_argument("--no-headless", dest="headless", action="store_false", help="Run with visible browser")
+    parser.add_argument("--deep", action="store_true", help="Run deep analysis")
+    parser.add_argument("--depth", choices=["simple", "medium", "deep"], default="medium",
+                        help="Analysis depth for deep mode")
     
     args = parser.parse_args()
     
-    results = analyze_keywords_batch(
-        keywords=args.keywords,
-        output_file=args.output,
-        headless=args.headless,
-    )
-    
-    for r in results:
-        print(f"\n{'='*50}")
-        print(f"Keyword: {r.get('keyword')}")
-        print(f"Results: {r.get('nb_results', 0):,}")
-        print(f"Contributors: {r.get('unique_contributors', 0)}")
-        print(f"Demand Score: {r.get('demand_score', 0):.1f}")
-        print(f"Competition Score: {r.get('competition_score', 0):.1f}")
-        print(f"Opportunity Score: {r.get('opportunity_score', 0):.1f}")
-        print(f"Trend: {r.get('trend', 'unknown')}")
-        print(f"Urgency: {r.get('urgency', 'unknown')}")
-        if r.get("related_searches"):
-            print(f"Related: {', '.join(r['related_searches'][:5])}")
+    if args.deep:
+        # Run deep analysis for single keyword
+        keyword = args.keywords[0]
+        print(f"\nRunning DEEP analysis on '{keyword}' (depth: {args.depth})...")
+        print("This may take 3-5 minutes...")
+        print("=" * 60)
+        
+        def print_progress(p):
+            print(f"  [{p['progress']:3d}%] {p['step']}: {p['message']}")
+        
+        results = analyze_keyword_deep(
+            keyword=keyword,
+            depth=args.depth,
+            output_file=args.output,
+            headless=args.headless,
+            progress_callback=print_progress,
+        )
+        
+        scoring = results.get("scoring", {})
+        market = results.get("market_analysis", {})
+        
+        print("\n" + "=" * 60)
+        print("DEEP ANALYSIS RESULTS")
+        print("=" * 60)
+        print(f"\nKeyword: {results['keyword']}")
+        print(f"Total Results: {results['search_results'].get('nb_results', 0):,}")
+        print(f"Assets Analyzed: {len(results.get('asset_details', []))}")
+        print(f"Contributors Profiled: {len(results.get('contributor_profiles', []))}")
+        
+        print(f"\nSCORES:")
+        print(f"  Demand Score:      {scoring.get('demand_score', 0):.1f}")
+        print(f"  Competition Score: {scoring.get('competition_score', 0):.1f}")
+        print(f"  Gap Score:         {scoring.get('gap_score', 0):.1f}")
+        print(f"  Freshness Score:   {scoring.get('freshness_score', 0):.1f}")
+        print(f"  Quality Gap Score: {scoring.get('quality_gap_score', 0):.1f}")
+        print(f"  ─────────────────────")
+        print(f"  OPPORTUNITY SCORE: {scoring.get('opportunity_score', 0):.1f}")
+        print(f"  Trend: {scoring.get('trend', 'unknown')} | Urgency: {scoring.get('urgency', 'unknown')}")
+        
+        print(f"\nMARKET INSIGHTS:")
+        print(f"  Premium Ratio: {market.get('premium_ratio', 0):.1%}")
+        print(f"  Contributor Concentration: {market.get('contributor_concentration', 0):.1%}")
+        
+        if args.output:
+            print(f"\nFull results saved to: {args.output}")
+    else:
+        # Run standard batch analysis
+        results = analyze_keywords_batch(
+            keywords=args.keywords,
+            output_file=args.output,
+            headless=args.headless,
+        )
+        
+        for r in results:
+            print(f"\n{'='*50}")
+            print(f"Keyword: {r.get('keyword')}")
+            print(f"Results: {r.get('nb_results', 0):,}")
+            print(f"Contributors: {r.get('unique_contributors', 0)}")
+            print(f"Demand Score: {r.get('demand_score', 0):.1f}")
+            print(f"Competition Score: {r.get('competition_score', 0):.1f}")
+            print(f"Opportunity Score: {r.get('opportunity_score', 0):.1f}")
+            print(f"Trend: {r.get('trend', 'unknown')}")
+            print(f"Urgency: {r.get('urgency', 'unknown')}")
+            if r.get("related_searches"):
+                print(f"Related: {', '.join(r['related_searches'][:5])}")

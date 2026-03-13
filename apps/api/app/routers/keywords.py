@@ -1,6 +1,6 @@
 """Keywords router - Keyword research and analysis with opportunity scoring"""
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -28,6 +28,77 @@ class KeywordAnalysis(BaseModel):
     categories: List[dict] = []
     scraped_at: Optional[str] = None
     source: Optional[str] = None
+
+
+class DeepAnalysisScoring(BaseModel):
+    demand_score: float = 0
+    competition_score: float = 0
+    gap_score: float = 50
+    freshness_score: float = 50
+    quality_gap_score: float = 50
+    opportunity_score: float = 0
+    trend: str = "stable"
+    urgency: str = "medium"
+    factors: Dict[str, Any] = {}
+
+
+class MarketAnalysis(BaseModel):
+    total_results: int = 0
+    sample_size: int = 0
+    unique_contributors: int = 0
+    premium_ratio: float = 0.0
+    editorial_ratio: float = 0.0
+    ai_generated_ratio: float = 0.0
+    contributor_concentration: float = 0.0
+    price_analysis: Dict[str, Any] = {}
+    price_distribution: List[Dict[str, Any]] = []
+    dimension_analysis: Dict[str, Any] = {}
+    upload_date_analysis: Dict[str, Any] = {}
+    keyword_frequency: Dict[str, int] = {}
+    format_distribution: Dict[str, int] = {}
+    content_type_distribution: Dict[str, int] = {}
+    contributor_analysis: Dict[str, Any] = {}
+
+
+class VisualizationData(BaseModel):
+    score_breakdown: Dict[str, Any] = {}
+    price_distribution: List[Dict[str, Any]] = []
+    price_summary: Dict[str, Any] = {}
+    format_distribution: List[Dict[str, Any]] = []
+    orientation_distribution: List[Dict[str, Any]] = []
+    content_type_distribution: List[Dict[str, Any]] = []
+    contributor_chart: List[Dict[str, Any]] = []
+    keyword_cloud: List[Dict[str, Any]] = []
+    freshness_timeline: List[Dict[str, Any]] = []
+
+
+class DeepAnalysisResult(BaseModel):
+    keyword: str
+    depth: str = "medium"
+    search_results: Dict[str, Any] = {}
+    assets: List[Dict[str, Any]] = []
+    asset_details: List[Dict[str, Any]] = []
+    contributor_profiles: List[Dict[str, Any]] = []
+    market_analysis: MarketAnalysis = MarketAnalysis()
+    scoring: DeepAnalysisScoring = DeepAnalysisScoring()
+    visualizations: VisualizationData = VisualizationData()
+    scraped_at: Optional[str] = None
+    source: Optional[str] = None
+    errors: List[str] = []
+
+
+class DepthComparisonFeature(BaseModel):
+    name: str
+    estimated_time: str
+    max_assets: int
+    features: List[str] = []
+    not_included: List[str] = []
+
+
+class DepthComparison(BaseModel):
+    depths: List[str]
+    features: Dict[str, DepthComparisonFeature]
+    recommended: str = "medium"
 
 
 class KeywordSearchResult(BaseModel):
@@ -223,3 +294,121 @@ async def analyze_keywords_batch(
         }
     
     raise HTTPException(status_code=501, detail="Batch analysis requires Pandas store")
+
+
+@router.get("/analyze/{keyword}/deep", response_model=DeepAnalysisResult)
+async def analyze_keyword_deep(
+    keyword: str,
+    depth: str = Query("medium", pattern="^(simple|medium|deep)$", description="Analysis depth"),
+    force_refresh: bool = Query(False, description="Skip cache and force new analysis"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run deep analysis on a keyword with comprehensive market intelligence.
+    
+    Depth levels:
+    - **simple**: Fast analysis (~30-60s) - search results only
+    - **medium**: Detailed analysis (~3-5min) - 50 assets, 10 contributors
+    - **deep**: Comprehensive analysis (~10-15min) - 100 assets, 20 contributors
+    
+    Returns detailed scoring, market analysis, contributor profiles, and visualization data.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Deep analysis requires Pandas store")
+    
+    from app.store import get_store
+    from app.services.deep_analysis_service import DeepAnalysisService
+    
+    store = get_store()
+    service = DeepAnalysisService(store)
+    
+    try:
+        result = await service.analyze_keyword_deep(
+            keyword=keyword,
+            depth=depth,
+            force_refresh=force_refresh,
+        )
+        
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result.get("error"))
+        
+        # Format response
+        return DeepAnalysisResult(
+            keyword=result.get("keyword", keyword),
+            depth=result.get("depth", depth),
+            search_results=result.get("search_results", {}),
+            assets=result.get("assets", []),
+            asset_details=result.get("asset_details", []),
+            contributor_profiles=result.get("contributor_profiles", []),
+            market_analysis=MarketAnalysis(**result.get("market_analysis", {})) if result.get("market_analysis") else MarketAnalysis(),
+            scoring=DeepAnalysisScoring(**result.get("scoring", {})) if result.get("scoring") else DeepAnalysisScoring(),
+            visualizations=VisualizationData(**result.get("visualizations", {})) if result.get("visualizations") else VisualizationData(),
+            scraped_at=result.get("scraped_at"),
+            source=result.get("source", "live"),
+            errors=result.get("errors", []),
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/analysis-comparison", response_model=DepthComparison)
+async def get_analysis_depth_comparison():
+    """
+    Get comparison of analysis depth options for the depth selector UI.
+    
+    Returns features, estimated times, and recommendations for each depth level.
+    """
+    from app.services.deep_analysis_service import get_analysis_comparison
+    
+    comparison = get_analysis_comparison()
+    
+    return DepthComparison(
+        depths=comparison.get("depths", ["simple", "medium", "deep"]),
+        features={
+            k: DepthComparisonFeature(**v)
+            for k, v in comparison.get("features", {}).items()
+        },
+        recommended=comparison.get("recommended", "medium"),
+    )
+
+
+@router.get("/analyze/{keyword}/visualization-data")
+async def get_keyword_visualization_data(
+    keyword: str,
+    depth: str = Query("medium", pattern="^(simple|medium|deep)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get pre-computed visualization data for a keyword.
+    
+    Returns cached visualization data if available, otherwise triggers analysis.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Visualization data requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    
+    # Check for cached deep analysis
+    cached = store.get_market_analysis(keyword.lower().strip(), depth)
+    
+    if cached and cached.get("visualizations"):
+        return {
+            "keyword": keyword,
+            "depth": depth,
+            "visualizations": cached["visualizations"],
+            "source": "cache",
+            "scraped_at": cached.get("scraped_at"),
+        }
+    
+    return {
+        "keyword": keyword,
+        "depth": depth,
+        "visualizations": None,
+        "source": "none",
+        "message": "Run deep analysis to generate visualization data",
+    }

@@ -8,6 +8,7 @@ from app.routers import scraper
 from app.routers import briefs
 from app.routers import webhooks
 from app.routers import analytics
+from app.routers import contributors
 
 __all__ = [
     "auth",
@@ -18,4 +19,5 @@ __all__ = [
     "briefs",
     "webhooks",
     "analytics",
+    "contributors",
 ]

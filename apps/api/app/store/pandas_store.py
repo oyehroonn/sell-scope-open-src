@@ -91,6 +91,25 @@ class PandasStore:
             "avg_demand_score", "avg_competition_score", "top_keywords", "trend",
             "scraped_at", "created_at", "updated_at"
         ])
+        # Contributor profiles for competitor analysis
+        self._contributor_profiles: pd.DataFrame = pd.DataFrame(columns=[
+            "adobe_id", "name", "profile_url", "portfolio_url",
+            "total_assets", "total_photos", "total_vectors", "total_videos", "total_templates", "total_3d",
+            "premium_count", "premium_ratio", "top_categories", "top_keywords",
+            "category_distribution", "estimated_join_date", "upload_frequency_monthly",
+            "avg_asset_dimensions", "quality_indicators", "niches", "competition_level",
+            "sample_assets", "scraped_at", "created_at", "updated_at"
+        ])
+        # Deep market analysis cache
+        self._market_analysis: pd.DataFrame = pd.DataFrame(columns=[
+            "keyword", "analysis_depth", "nb_results", "sample_size",
+            "unique_contributors", "premium_ratio", "editorial_ratio", "ai_generated_ratio",
+            "price_analysis", "dimension_analysis", "upload_date_analysis",
+            "keyword_frequency", "contributor_concentration", "format_distribution",
+            "top_assets", "contributor_profiles", "similar_assets",
+            "scoring", "visualizations", "errors",
+            "scraped_at", "expires_at", "created_at", "updated_at"
+        ])
 
     def load_all(self) -> None:
         """Load the full nested database from disk (pickle)."""
@@ -110,6 +129,8 @@ class PandasStore:
             self._asset_categories = data.get("asset_categories", self._asset_categories)
             self._keyword_metrics = data.get("keyword_metrics", self._keyword_metrics)
             self._niche_scores = data.get("niche_scores", self._niche_scores)
+            self._contributor_profiles = data.get("contributor_profiles", self._contributor_profiles)
+            self._market_analysis = data.get("market_analysis", self._market_analysis)
             # Ensure columns exist
             for col in ASSET_COLUMNS:
                 if col not in self._assets.columns:
@@ -131,6 +152,8 @@ class PandasStore:
             "asset_categories": self._asset_categories,
             "keyword_metrics": self._keyword_metrics,
             "niche_scores": self._niche_scores,
+            "contributor_profiles": self._contributor_profiles,
+            "market_analysis": self._market_analysis,
         }
         with open(self._path, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -670,6 +693,218 @@ class PandasStore:
                 "trend": trend,
             })
     
+    # ——— Contributor Profiles ———
+    def upsert_contributor_profile(self, data: Dict[str, Any]) -> None:
+        """Insert or update a contributor profile."""
+        adobe_id = str(data.get("adobe_id", "")).strip()
+        if not adobe_id:
+            return
+        now = datetime.utcnow()
+        
+        mask = self._contributor_profiles["adobe_id"] == adobe_id
+        row = {
+            "adobe_id": adobe_id,
+            "name": data.get("name"),
+            "profile_url": data.get("profile_url"),
+            "portfolio_url": data.get("portfolio_url"),
+            "total_assets": data.get("total_assets", 0),
+            "total_photos": data.get("total_photos", 0),
+            "total_vectors": data.get("total_vectors", 0),
+            "total_videos": data.get("total_videos", 0),
+            "total_templates": data.get("total_templates", 0),
+            "total_3d": data.get("total_3d", 0),
+            "premium_count": data.get("premium_count", 0),
+            "premium_ratio": data.get("premium_ratio", 0.0),
+            "top_categories": data.get("top_categories", []),
+            "top_keywords": data.get("top_keywords", []),
+            "category_distribution": data.get("category_distribution", {}),
+            "estimated_join_date": data.get("estimated_join_date"),
+            "upload_frequency_monthly": data.get("upload_frequency_monthly", 0.0),
+            "avg_asset_dimensions": data.get("avg_asset_dimensions"),
+            "quality_indicators": data.get("quality_indicators", {}),
+            "niches": data.get("niches", []),
+            "competition_level": data.get("competition_level"),
+            "sample_assets": data.get("sample_assets", []),
+            "scraped_at": data.get("scraped_at") or now,
+            "updated_at": now,
+        }
+        
+        if mask.any():
+            idx = self._contributor_profiles.loc[mask].index[0]
+            for k, v in row.items():
+                self._contributor_profiles.at[idx, k] = v
+        else:
+            row["created_at"] = now
+            new_row = pd.DataFrame([row])
+            if self._contributor_profiles.empty:
+                self._contributor_profiles = new_row.copy()
+            else:
+                self._contributor_profiles = pd.concat([self._contributor_profiles, new_row], ignore_index=True)
+        self._save()
+    
+    def get_contributor_profile(self, adobe_id: str) -> Optional[Dict]:
+        """Get profile for a specific contributor."""
+        mask = self._contributor_profiles["adobe_id"] == str(adobe_id)
+        if not mask.any():
+            return None
+        return self._row_to_dict(self._contributor_profiles.loc[mask].iloc[0])
+    
+    def get_all_contributor_profiles(self, limit: int = 100) -> List[Dict]:
+        """Get all contributor profiles sorted by portfolio size."""
+        df = self._contributor_profiles.sort_values("total_assets", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def get_top_contributors_for_keyword(self, keyword: str, limit: int = 10) -> List[Dict]:
+        """Get top contributors for a specific keyword based on their activity."""
+        profiles = []
+        for _, row in self._contributor_profiles.iterrows():
+            top_keywords = row.get("top_keywords", [])
+            if isinstance(top_keywords, str):
+                try:
+                    import ast
+                    top_keywords = ast.literal_eval(top_keywords)
+                except:
+                    top_keywords = []
+            
+            keyword_lower = keyword.lower()
+            if any(keyword_lower in kw.lower() for kw in top_keywords):
+                profiles.append(self._row_to_dict(row))
+        
+        profiles.sort(key=lambda x: x.get("total_assets", 0), reverse=True)
+        return profiles[:limit]
+    
+    def search_contributor_profiles(self, query: str, limit: int = 20) -> List[Dict]:
+        """Search contributor profiles by name or niche."""
+        query_lower = query.lower()
+        results = []
+        
+        for _, row in self._contributor_profiles.iterrows():
+            name = (row.get("name") or "").lower()
+            niches = row.get("niches", [])
+            if isinstance(niches, str):
+                try:
+                    import ast
+                    niches = ast.literal_eval(niches)
+                except:
+                    niches = []
+            
+            if query_lower in name or any(query_lower in n.lower() for n in niches):
+                results.append(self._row_to_dict(row))
+        
+        results.sort(key=lambda x: x.get("total_assets", 0), reverse=True)
+        return results[:limit]
+    
+    # ——— Deep Market Analysis Cache ———
+    def upsert_market_analysis(self, data: Dict[str, Any]) -> None:
+        """Insert or update market analysis cache."""
+        keyword = (data.get("keyword") or "").strip().lower()
+        depth = data.get("analysis_depth") or data.get("depth") or "medium"
+        if not keyword:
+            return
+        now = datetime.utcnow()
+        
+        mask = (self._market_analysis["keyword"] == keyword) & (self._market_analysis["analysis_depth"] == depth)
+        
+        # Set expiry (24 hours for deep, 12 hours for medium, 6 hours for simple)
+        hours = {"deep": 24, "medium": 12, "simple": 6}.get(depth, 12)
+        from datetime import timedelta
+        expires_at = now + timedelta(hours=hours)
+        
+        row = {
+            "keyword": keyword,
+            "analysis_depth": depth,
+            "nb_results": data.get("nb_results") or data.get("search_results", {}).get("nb_results", 0),
+            "sample_size": data.get("sample_size") or len(data.get("assets", [])),
+            "unique_contributors": data.get("unique_contributors") or data.get("market_analysis", {}).get("unique_contributors", 0),
+            "premium_ratio": data.get("premium_ratio") or data.get("market_analysis", {}).get("premium_ratio", 0),
+            "editorial_ratio": data.get("editorial_ratio") or data.get("market_analysis", {}).get("editorial_ratio", 0),
+            "ai_generated_ratio": data.get("ai_generated_ratio") or data.get("market_analysis", {}).get("ai_generated_ratio", 0),
+            "price_analysis": data.get("price_analysis") or data.get("market_analysis", {}).get("price_analysis", {}),
+            "dimension_analysis": data.get("dimension_analysis") or data.get("market_analysis", {}).get("dimension_analysis", {}),
+            "upload_date_analysis": data.get("upload_date_analysis") or data.get("market_analysis", {}).get("upload_date_analysis", {}),
+            "keyword_frequency": data.get("keyword_frequency") or data.get("market_analysis", {}).get("keyword_frequency", {}),
+            "contributor_concentration": data.get("contributor_concentration") or data.get("market_analysis", {}).get("contributor_concentration", 0),
+            "format_distribution": data.get("format_distribution") or data.get("market_analysis", {}).get("format_distribution", {}),
+            "top_assets": data.get("top_assets") or data.get("assets", [])[:20],
+            "contributor_profiles": data.get("contributor_profiles", []),
+            "similar_assets": data.get("similar_assets", []),
+            "scoring": data.get("scoring", {}),
+            "visualizations": data.get("visualizations", {}),
+            "errors": data.get("errors", []),
+            "scraped_at": data.get("scraped_at") or now,
+            "expires_at": expires_at,
+            "updated_at": now,
+        }
+        
+        if mask.any():
+            idx = self._market_analysis.loc[mask].index[0]
+            for k, v in row.items():
+                self._market_analysis.at[idx, k] = v
+        else:
+            row["created_at"] = now
+            new_row = pd.DataFrame([row])
+            if self._market_analysis.empty:
+                self._market_analysis = new_row.copy()
+            else:
+                self._market_analysis = pd.concat([self._market_analysis, new_row], ignore_index=True)
+        self._save()
+    
+    def get_market_analysis(self, keyword: str, depth: str = "medium") -> Optional[Dict]:
+        """Get cached market analysis for a keyword if not expired."""
+        keyword_lower = keyword.lower()
+        mask = (self._market_analysis["keyword"] == keyword_lower) & (self._market_analysis["analysis_depth"] == depth)
+        
+        if not mask.any():
+            return None
+        
+        row = self._market_analysis.loc[mask].iloc[0]
+        result = self._row_to_dict(row)
+        
+        # Check if expired
+        expires_at = result.get("expires_at")
+        if expires_at:
+            from datetime import datetime as dt
+            if isinstance(expires_at, str):
+                try:
+                    expires_at = dt.fromisoformat(expires_at.replace("Z", ""))
+                except:
+                    expires_at = None
+            if expires_at and dt.utcnow() > expires_at:
+                return None
+        
+        return result
+    
+    def get_all_market_analyses(self, limit: int = 50) -> List[Dict]:
+        """Get all cached market analyses."""
+        df = self._market_analysis.sort_values("scraped_at", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def clean_expired_market_analyses(self) -> int:
+        """Remove expired market analysis entries."""
+        now = datetime.utcnow()
+        initial_count = len(self._market_analysis)
+        
+        # Convert expires_at to datetime for comparison
+        valid_mask = []
+        for _, row in self._market_analysis.iterrows():
+            expires_at = row.get("expires_at")
+            if expires_at is None:
+                valid_mask.append(True)
+                continue
+            if isinstance(expires_at, str):
+                try:
+                    from datetime import datetime as dt
+                    expires_at = dt.fromisoformat(expires_at.replace("Z", ""))
+                except:
+                    valid_mask.append(True)
+                    continue
+            valid_mask.append(expires_at > now)
+        
+        self._market_analysis = self._market_analysis[valid_mask].reset_index(drop=True)
+        self._save()
+        
+        return initial_count - len(self._market_analysis)
+    
     # ——— Pandas-specific: raw DataFrames for analysis ———
     def get_assets_df(self) -> pd.DataFrame:
         """Return the full assets DataFrame (read-only view; copy to modify)."""
@@ -683,3 +918,9 @@ class PandasStore:
     
     def get_niche_scores_df(self) -> pd.DataFrame:
         return self._niche_scores.copy()
+    
+    def get_contributor_profiles_df(self) -> pd.DataFrame:
+        return self._contributor_profiles.copy()
+    
+    def get_market_analysis_df(self) -> pd.DataFrame:
+        return self._market_analysis.copy()

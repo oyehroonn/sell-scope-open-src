@@ -19,6 +19,7 @@ from app.routers import (
     analytics,
     assets,
     insights,
+    contributors,
 )
 
 structlog.configure(
@@ -82,6 +83,7 @@ app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 app.include_router(assets.router, prefix="/assets", tags=["Assets"])
 app.include_router(insights.router, prefix="/insights", tags=["Insights"])
+app.include_router(contributors.router, prefix="/contributors", tags=["Contributors"])
 
 
 @app.get("/")

@@ -34,7 +34,11 @@ import {
   Bookmark,
   BookmarkCheck,
   Trash2,
+  Info,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
+import { EnhancedDetailsModal, ProgressIndicator } from "@/components/keyword-research";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -122,11 +126,14 @@ export default function KeywordsPage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [useLiveScraping, setUseLiveScraping] = useState(true);
+  const [researchDepth, setResearchDepth] = useState<"simple" | "medium" | "deep">("simple");
+  const [showDepthComparison, setShowDepthComparison] = useState(false);
   
   const [savedResearches, setSavedResearches] = useState<SavedResearch[]>([]);
   const [activeTab, setActiveTab] = useState<"researched" | "saved">("researched");
   
   const [selectedKeyword, setSelectedKeyword] = useState<KeywordResult | null>(null);
+  const [deepAnalysisData, setDeepAnalysisData] = useState<any | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [showBriefModal, setShowBriefModal] = useState(false);
   const [copiedBrief, setCopiedBrief] = useState(false);
@@ -223,33 +230,72 @@ export default function KeywordsPage() {
     setError(null);
     setHasSearched(true);
     setSuggestions([]);
+    setDeepAnalysisData(null); // Reset deep analysis data for new search
     
     try {
-      const liveParam = useLiveScraping ? "live=true" : "";
-      const response = await fetch(
-        `${API_BASE}/keywords/analyze/${encodeURIComponent(searchQuery.trim())}?${liveParam}`
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        setResults([data]);
-        
-        const searchResponse = await fetch(
-          `${API_BASE}/keywords/search?q=${encodeURIComponent(searchQuery.trim())}&page_size=10`
+      // Use different endpoint based on research depth
+      if (researchDepth === "simple") {
+        // Simple analysis - use regular endpoint
+        const liveParam = useLiveScraping ? "live=true" : "";
+        const response = await fetch(
+          `${API_BASE}/keywords/analyze/${encodeURIComponent(searchQuery.trim())}?${liveParam}`
         );
-        if (searchResponse.ok) {
-          const searchData = await searchResponse.json();
-          if (searchData.keywords && searchData.keywords.length > 0) {
-            const existingKeyword = data.keyword.toLowerCase();
-            const additionalResults = searchData.keywords.filter(
-              (k: KeywordResult) => k.keyword.toLowerCase() !== existingKeyword
-            );
-            setResults([data, ...additionalResults]);
+        
+        if (response.ok) {
+          const data = await response.json();
+          setResults([data]);
+          
+          // Also fetch related keywords
+          const searchResponse = await fetch(
+            `${API_BASE}/keywords/search?q=${encodeURIComponent(searchQuery.trim())}&page_size=10`
+          );
+          if (searchResponse.ok) {
+            const searchData = await searchResponse.json();
+            if (searchData.keywords && searchData.keywords.length > 0) {
+              const existingKeyword = data.keyword.toLowerCase();
+              const additionalResults = searchData.keywords.filter(
+                (k: KeywordResult) => k.keyword.toLowerCase() !== existingKeyword
+              );
+              setResults([data, ...additionalResults]);
+            }
           }
+        } else {
+          const errorData = await response.json().catch(() => ({}));
+          setError(errorData.detail || "Failed to analyze keyword. Try again.");
         }
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        setError(errorData.detail || "Failed to analyze keyword. Try again.");
+        // Deep analysis - use deep endpoint
+        const response = await fetch(
+          `${API_BASE}/keywords/analyze/${encodeURIComponent(searchQuery.trim())}/deep?depth=${researchDepth}`
+        );
+        
+        if (response.ok) {
+          const data = await response.json();
+          // Store the full deep analysis data for the modal
+          setDeepAnalysisData(data);
+          
+          // Convert deep analysis to KeywordResult format for the list view
+          const keywordResult: KeywordResult = {
+            keyword: data.keyword,
+            nb_results: data.search_results?.nb_results || 0,
+            unique_contributors: data.market_analysis?.unique_contributors || 0,
+            demand_score: data.scoring?.demand_score || 0,
+            competition_score: data.scoring?.competition_score || 0,
+            gap_score: data.scoring?.gap_score || 50,
+            freshness_score: data.scoring?.freshness_score || 50,
+            opportunity_score: data.scoring?.opportunity_score || 0,
+            trend: data.scoring?.trend || "stable",
+            urgency: data.scoring?.urgency || "medium",
+            related_searches: data.search_results?.related_searches || [],
+            categories: data.search_results?.categories || [],
+            scraped_at: data.scraped_at,
+            source: `deep-${researchDepth}`,
+          };
+          setResults([keywordResult]);
+        } else {
+          const errorData = await response.json().catch(() => ({}));
+          setError(errorData.detail || "Failed to run deep analysis. Try again.");
+        }
       }
     } catch (e) {
       console.error("Search error:", e);
@@ -593,24 +639,206 @@ Generated: ${new Date().toLocaleString()}`;
             </Button>
           </div>
 
-          <div className="mt-4 flex items-center gap-4">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={useLiveScraping}
-                onChange={(e) => setUseLiveScraping(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              <span className="text-sm">
-                Live scraping from Adobe Stock
-                <span className="text-muted-foreground ml-1">(slower but accurate)</span>
-              </span>
-            </label>
-            {useLiveScraping && (
-              <Badge variant="outline" className="text-amber-600 border-amber-600">
-                <Clock className="h-3 w-3 mr-1" />
-                ~30-60 seconds
-              </Badge>
+          {/* Research Depth Selector */}
+          <div className="mt-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Research Depth:</span>
+                <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                  {(["simple", "medium", "deep"] as const).map((depth) => {
+                    const isSelected = researchDepth === depth;
+                    const colors = {
+                      simple: {
+                        bg: "bg-blue-500",
+                        text: "text-blue-500",
+                        border: "border-blue-500",
+                        glow: "shadow-[0_0_15px_rgba(59,130,246,0.5)]",
+                        badge: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
+                      },
+                      medium: {
+                        bg: "bg-purple-500",
+                        text: "text-purple-500",
+                        border: "border-purple-500",
+                        glow: "shadow-[0_0_15px_rgba(168,85,247,0.5)]",
+                        badge: "bg-purple-500/10 text-purple-600 dark:text-purple-400",
+                      },
+                      deep: {
+                        bg: "bg-amber-500",
+                        text: "text-amber-500",
+                        border: "border-amber-500",
+                        glow: "shadow-[0_0_15px_rgba(245,158,11,0.5)]",
+                        badge: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+                      },
+                    }[depth];
+                    
+                    return (
+                      <button
+                        key={depth}
+                        onClick={() => setResearchDepth(depth)}
+                        disabled={isSearching}
+                        className={`
+                          flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium
+                          transition-all duration-200
+                          ${isSelected
+                            ? `bg-gray-900 dark:bg-gray-100 ${colors.text} ${colors.glow}`
+                            : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-700/50"
+                          }
+                          ${isSearching ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+                        `}
+                      >
+                        {depth === "simple" && <Zap className={`h-3.5 w-3.5 ${isSelected ? colors.text : ""}`} />}
+                        {depth === "medium" && <Sparkles className={`h-3.5 w-3.5 ${isSelected ? colors.text : ""}`} />}
+                        {depth === "deep" && <Target className={`h-3.5 w-3.5 ${isSelected ? colors.text : ""}`} />}
+                        <span className={isSelected ? "text-white dark:text-gray-900" : ""}>{depth.charAt(0).toUpperCase() + depth.slice(1)}</span>
+                        {depth === "medium" && !isSelected && (
+                          <span className="ml-1 px-1.5 py-0.5 text-[9px] font-medium uppercase bg-purple-500/10 text-purple-600 dark:text-purple-400 rounded">
+                            Best
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => setShowDepthComparison(!showDepthComparison)}
+                  className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+                >
+                  {showDepthComparison ? <ChevronUp className="h-4 w-4" /> : <Info className="h-4 w-4" />}
+                </button>
+              </div>
+              <div className={`
+                flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border
+                ${researchDepth === "simple" 
+                  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30" 
+                  : researchDepth === "medium" 
+                    ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30" 
+                    : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                }
+              `}>
+                <Clock className="h-3 w-3" />
+                {researchDepth === "simple" ? "~30-60 sec" : researchDepth === "medium" ? "~3-5 min" : "~10-15 min"}
+              </div>
+            </div>
+
+            {/* Depth Comparison Panel */}
+            {showDepthComparison && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-4 bg-gray-50 dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700">
+                {(["simple", "medium", "deep"] as const).map((depth) => {
+                  const isSelected = researchDepth === depth;
+                  const config = {
+                    simple: {
+                      name: "Simple",
+                      subtitle: "Quick Analysis",
+                      time: "30-60 sec",
+                      assets: 20,
+                      features: ["Search results analysis", "Basic scores", "Related keywords", "Categories"],
+                      color: "blue",
+                      borderColor: "border-blue-500",
+                      glowColor: "shadow-[0_0_20px_rgba(59,130,246,0.4)]",
+                      iconBg: "bg-blue-500",
+                      textColor: "text-blue-500",
+                      badgeBg: "bg-blue-500",
+                    },
+                    medium: {
+                      name: "Deep",
+                      subtitle: "Recommended",
+                      time: "3-5 min",
+                      assets: 50,
+                      features: ["All Simple features", "50 asset details", "10 contributor profiles", "Price analysis", "Market charts"],
+                      color: "purple",
+                      borderColor: "border-purple-500",
+                      glowColor: "shadow-[0_0_20px_rgba(168,85,247,0.4)]",
+                      iconBg: "bg-purple-500",
+                      textColor: "text-purple-500",
+                      badgeBg: "bg-purple-500",
+                    },
+                    deep: {
+                      name: "Comprehensive",
+                      subtitle: "Full Analysis",
+                      time: "10-15 min",
+                      assets: 100,
+                      features: ["All Deep features", "100 asset details", "20 contributor profiles", "Keyword network", "Full portfolio analysis"],
+                      color: "amber",
+                      borderColor: "border-amber-500",
+                      glowColor: "shadow-[0_0_20px_rgba(245,158,11,0.4)]",
+                      iconBg: "bg-amber-500",
+                      textColor: "text-amber-500",
+                      badgeBg: "bg-amber-500",
+                    },
+                  }[depth];
+                  
+                  return (
+                    <div
+                      key={depth}
+                      onClick={() => setResearchDepth(depth)}
+                      className={`
+                        relative p-4 rounded-lg cursor-pointer transition-all duration-200
+                        bg-white dark:bg-gray-800
+                        ${isSelected
+                          ? `border-2 ${config.borderColor} ${config.glowColor}`
+                          : "border border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
+                        }
+                      `}
+                    >
+                      {/* Recommended Badge */}
+                      {depth === "medium" && (
+                        <div className="absolute -top-2.5 left-1/2 -translate-x-1/2">
+                          <span className="px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-purple-500 text-white rounded">
+                            Recommended
+                          </span>
+                        </div>
+                      )}
+                      
+                      {/* Header */}
+                      <div className="flex items-start justify-between mb-3 mt-1">
+                        <div className="flex items-center gap-2">
+                          <div className={`p-1.5 rounded-md ${isSelected ? config.iconBg : "bg-gray-100 dark:bg-gray-700"}`}>
+                            {depth === "simple" && <Zap className={`h-4 w-4 ${isSelected ? "text-white" : "text-gray-500 dark:text-gray-400"}`} />}
+                            {depth === "medium" && <Sparkles className={`h-4 w-4 ${isSelected ? "text-white" : "text-gray-500 dark:text-gray-400"}`} />}
+                            {depth === "deep" && <Target className={`h-4 w-4 ${isSelected ? "text-white" : "text-gray-500 dark:text-gray-400"}`} />}
+                          </div>
+                          <div>
+                            <h4 className={`font-semibold text-sm ${isSelected ? config.textColor : "text-gray-900 dark:text-white"}`}>
+                              {config.name}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                              {config.subtitle}
+                            </p>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <div className={`p-1 rounded-full ${config.iconBg}`}>
+                            <Check className="h-3 w-3 text-white" />
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Stats */}
+                      <div className="flex items-center gap-3 mb-3 pb-3 border-b border-gray-100 dark:border-gray-700">
+                        <div className={`flex items-center gap-1 text-xs ${isSelected ? config.textColor : "text-gray-500 dark:text-gray-400"}`}>
+                          <Clock className="h-3 w-3" />
+                          <span>{config.time}</span>
+                        </div>
+                        <div className="w-px h-3 bg-gray-200 dark:bg-gray-700" />
+                        <div className={`flex items-center gap-1 text-xs ${isSelected ? config.textColor : "text-gray-500 dark:text-gray-400"}`}>
+                          <FileText className="h-3 w-3" />
+                          <span>{config.assets} assets</span>
+                        </div>
+                      </div>
+                      
+                      {/* Features */}
+                      <ul className="space-y-1.5">
+                        {config.features.map((feature, i) => (
+                          <li key={i} className="flex items-start gap-2 text-xs text-gray-600 dark:text-gray-400">
+                            <Check className={`h-3 w-3 mt-0.5 flex-shrink-0 ${isSelected ? config.textColor : "text-gray-400 dark:text-gray-500"}`} />
+                            <span>{feature}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
 
@@ -636,20 +864,49 @@ Generated: ${new Date().toLocaleString()}`;
       </Card>
 
       {isSearching && (
-        <Card className="border-blue-200 bg-blue-50 dark:bg-blue-950/20">
+        <Card className={`
+          ${researchDepth === "simple" 
+            ? "border-blue-200 bg-blue-50 dark:bg-blue-950/20" 
+            : researchDepth === "medium"
+              ? "border-purple-200 bg-purple-50 dark:bg-purple-950/20"
+              : "border-amber-200 bg-amber-50 dark:bg-amber-950/20"
+          }
+        `}>
           <CardContent className="py-8">
             <div className="flex flex-col items-center text-center">
               <div className="relative">
-                <Loader2 className="h-12 w-12 animate-spin text-blue-500" />
-                <Sparkles className="h-5 w-5 text-amber-500 absolute -top-1 -right-1 animate-pulse" />
+                <Loader2 className={`h-12 w-12 animate-spin ${
+                  researchDepth === "simple" ? "text-blue-500" 
+                    : researchDepth === "medium" ? "text-purple-500" 
+                    : "text-amber-500"
+                }`} />
+                {researchDepth === "simple" && <Zap className="h-5 w-5 text-blue-400 absolute -top-1 -right-1 animate-pulse" />}
+                {researchDepth === "medium" && <Sparkles className="h-5 w-5 text-purple-400 absolute -top-1 -right-1 animate-pulse" />}
+                {researchDepth === "deep" && <Target className="h-5 w-5 text-amber-400 absolute -top-1 -right-1 animate-pulse" />}
               </div>
-              <h3 className="mt-4 font-semibold text-lg">Analyzing &quot;{searchQuery}&quot;</h3>
+              <h3 className="mt-4 font-semibold text-lg">
+                {researchDepth === "simple" && "Quick Analysis"}
+                {researchDepth === "medium" && "Deep Research"}
+                {researchDepth === "deep" && "Comprehensive Analysis"}
+                {" "}&quot;{searchQuery}&quot;
+              </h3>
               <p className="text-muted-foreground mt-2 max-w-md">
-                {useLiveScraping 
-                  ? "Scraping Adobe Stock for real-time data. This may take 30-60 seconds..."
-                  : "Searching existing data for keyword metrics..."
+                {researchDepth === "simple" 
+                  ? "Analyzing search results and calculating scores. This takes about 30-60 seconds..."
+                  : researchDepth === "medium"
+                    ? "Scraping 50 asset pages, analyzing 10 contributors, building market insights. This may take 3-5 minutes..."
+                    : "Full comprehensive analysis: 100 assets, 20 contributors, keyword networks, portfolio analysis. This may take 10-15 minutes..."
                 }
               </p>
+              {researchDepth !== "simple" && (
+                <div className="mt-4 w-full max-w-md">
+                  <ProgressIndicator 
+                    isActive={true}
+                    depth={researchDepth}
+                    keyword={searchQuery}
+                  />
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -677,6 +934,19 @@ Generated: ${new Date().toLocaleString()}`;
                 <Badge variant="outline" className="text-emerald-600 border-emerald-600">
                   <Zap className="h-3 w-3 mr-1" />
                   Live Data
+                </Badge>
+              )}
+              {results[0]?.source?.startsWith("deep-") && (
+                <Badge variant="outline" className={
+                  results[0]?.source === "deep-medium" 
+                    ? "text-purple-600 border-purple-600" 
+                    : "text-amber-600 border-amber-600"
+                }>
+                  {results[0]?.source === "deep-medium" ? (
+                    <><Sparkles className="h-3 w-3 mr-1" /> Deep Research</>
+                  ) : (
+                    <><Target className="h-3 w-3 mr-1" /> Comprehensive</>
+                  )}
                 </Badge>
               )}
               <Badge variant="secondary">{results.length} keywords</Badge>
@@ -798,140 +1068,26 @@ Generated: ${new Date().toLocaleString()}`;
         </div>
       )}
 
-      <Modal
+      <EnhancedDetailsModal
         isOpen={showDetailsModal}
         onClose={closeDetailsModal}
-        title={`Keyword Details: ${selectedKeyword?.keyword || ""}`}
-      >
-        {selectedKeyword && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                {isMarkedAsOpportunity(selectedKeyword.keyword) && (
-                  <Badge className="bg-amber-500 text-white">
-                    <Star className="h-3 w-3 mr-1 fill-current" />
-                    Marked as Opportunity
-                  </Badge>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant={isResearchSaved(selectedKeyword.keyword) ? "secondary" : "outline"}
-                  size="sm"
-                  onClick={() => isResearchSaved(selectedKeyword.keyword) 
-                    ? removeResearch(selectedKeyword.keyword) 
-                    : saveResearch(selectedKeyword)
-                  }
-                >
-                  {isResearchSaved(selectedKeyword.keyword) ? (
-                    <>
-                      <BookmarkCheck className="h-4 w-4 mr-1 text-emerald-500" />
-                      Saved
-                    </>
-                  ) : (
-                    <>
-                      <Save className="h-4 w-4 mr-1" />
-                      Save Research
-                    </>
-                  )}
-                </Button>
-                {isResearchSaved(selectedKeyword.keyword) && (
-                  <Button
-                    variant={isMarkedAsOpportunity(selectedKeyword.keyword) ? "default" : "outline"}
-                    size="sm"
-                    className={isMarkedAsOpportunity(selectedKeyword.keyword) ? "bg-amber-500 hover:bg-amber-600" : ""}
-                    onClick={() => toggleOpportunity(selectedKeyword.keyword)}
-                  >
-                    <Star className={`h-4 w-4 mr-1 ${isMarkedAsOpportunity(selectedKeyword.keyword) ? "fill-current" : ""}`} />
-                    {isMarkedAsOpportunity(selectedKeyword.keyword) ? "Opportunity" : "Mark Opportunity"}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
-                <div className={`text-3xl font-bold ${getScoreColor(selectedKeyword.opportunity_score)}`}>
-                  {selectedKeyword.opportunity_score.toFixed(0)}
-                </div>
-                <div className="text-sm text-muted-foreground">Opportunity</div>
-              </div>
-              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
-                <div className={`text-3xl font-bold ${getScoreColor(selectedKeyword.demand_score)}`}>
-                  {selectedKeyword.demand_score.toFixed(0)}
-                </div>
-                <div className="text-sm text-muted-foreground">Demand</div>
-              </div>
-              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
-                <div className={`text-3xl font-bold ${getScoreColor(100 - selectedKeyword.competition_score)}`}>
-                  {selectedKeyword.competition_score.toFixed(0)}
-                </div>
-                <div className="text-sm text-muted-foreground">Competition</div>
-              </div>
-              <div className="text-center p-4 rounded-lg bg-gray-50 dark:bg-gray-800">
-                <div className="text-3xl font-bold text-blue-500">
-                  {selectedKeyword.gap_score.toFixed(0)}
-                </div>
-                <div className="text-sm text-muted-foreground">Gap Score</div>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <h4 className="font-semibold">Score Breakdown</h4>
-              <div className="space-y-2">
-                {[
-                  { label: "Demand Score", value: selectedKeyword.demand_score },
-                  { label: "Competition Score", value: selectedKeyword.competition_score },
-                  { label: "Gap Score", value: selectedKeyword.gap_score },
-                  { label: "Freshness Score", value: selectedKeyword.freshness_score },
-                ].map((item) => (
-                  <div key={item.label} className="flex items-center justify-between">
-                    <span className="text-sm">{item.label}</span>
-                    <div className="flex items-center gap-2">
-                      <Progress value={item.value} className="w-32 h-2" />
-                      <span className="text-sm font-medium w-8">{item.value.toFixed(0)}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 rounded-lg border">
-                <div className="flex items-center gap-2 mb-2">
-                  <BarChart3 className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm text-muted-foreground">Total Results</span>
-                </div>
-                <div className="text-2xl font-bold">{selectedKeyword.nb_results.toLocaleString()}</div>
-              </div>
-              <div className="p-4 rounded-lg border">
-                <div className="flex items-center gap-2 mb-2">
-                  <Users className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm text-muted-foreground">Contributors</span>
-                </div>
-                <div className="text-2xl font-bold">{selectedKeyword.unique_contributors}</div>
-              </div>
-            </div>
-
-            {selectedKeyword.related_searches && selectedKeyword.related_searches.length > 0 && (
-              <div>
-                <h4 className="font-semibold mb-2">Related Keywords</h4>
-                <div className="flex flex-wrap gap-2">
-                  {selectedKeyword.related_searches.map((kw) => (
-                    <Badge key={kw} variant="secondary">{kw}</Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="text-xs text-muted-foreground pt-4 border-t">
-              {selectedKeyword.scraped_at && (
-                <span>Last analyzed: {new Date(selectedKeyword.scraped_at).toLocaleString()}</span>
-              )}
-            </div>
-          </div>
-        )}
-      </Modal>
+        keyword={selectedKeyword}
+        deepAnalysis={deepAnalysisData}
+        isSaved={selectedKeyword ? isResearchSaved(selectedKeyword.keyword) : false}
+        isOpportunity={selectedKeyword ? isMarkedAsOpportunity(selectedKeyword.keyword) : false}
+        onSave={() => {
+          if (selectedKeyword) {
+            isResearchSaved(selectedKeyword.keyword)
+              ? removeResearch(selectedKeyword.keyword)
+              : saveResearch(selectedKeyword);
+          }
+        }}
+        onToggleOpportunity={() => {
+          if (selectedKeyword) {
+            toggleOpportunity(selectedKeyword.keyword);
+          }
+        }}
+      />
 
       <Modal
         isOpen={showBriefModal}
