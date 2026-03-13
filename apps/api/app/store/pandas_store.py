@@ -79,6 +79,18 @@ class PandasStore:
         self._asset_keywords: pd.DataFrame = pd.DataFrame(columns=["asset_adobe_id", "keyword_term", "source", "created_at"])
         self._categories: pd.DataFrame = pd.DataFrame(columns=["name", "created_at"])
         self._asset_categories: pd.DataFrame = pd.DataFrame(columns=["asset_adobe_id", "category_name", "created_at"])
+        # Keyword metrics for opportunity scoring
+        self._keyword_metrics: pd.DataFrame = pd.DataFrame(columns=[
+            "keyword", "nb_results", "unique_contributors", "demand_score", "competition_score",
+            "gap_score", "freshness_score", "opportunity_score", "trend", "urgency",
+            "related_searches", "categories", "scraped_at", "created_at", "updated_at"
+        ])
+        # Niche/category scores for heatmap
+        self._niche_scores: pd.DataFrame = pd.DataFrame(columns=[
+            "name", "slug", "total_assets", "total_keywords", "avg_opportunity_score",
+            "avg_demand_score", "avg_competition_score", "top_keywords", "trend",
+            "scraped_at", "created_at", "updated_at"
+        ])
 
     def load_all(self) -> None:
         """Load the full nested database from disk (pickle)."""
@@ -96,6 +108,8 @@ class PandasStore:
             self._asset_keywords = data.get("asset_keywords", self._asset_keywords)
             self._categories = data.get("categories", self._categories)
             self._asset_categories = data.get("asset_categories", self._asset_categories)
+            self._keyword_metrics = data.get("keyword_metrics", self._keyword_metrics)
+            self._niche_scores = data.get("niche_scores", self._niche_scores)
             # Ensure columns exist
             for col in ASSET_COLUMNS:
                 if col not in self._assets.columns:
@@ -115,12 +129,15 @@ class PandasStore:
             "asset_keywords": self._asset_keywords,
             "categories": self._categories,
             "asset_categories": self._asset_categories,
+            "keyword_metrics": self._keyword_metrics,
+            "niche_scores": self._niche_scores,
         }
         with open(self._path, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _row_to_dict(row: pd.Series) -> Dict[str, Any]:
+        import ast
         d = row.to_dict()
         # Convert pandas/numpy types for JSON/API; keep dict/list (e.g. scraped_data) as-is
         for k, v in list(d.items()):
@@ -139,6 +156,14 @@ class PandasStore:
                 try:
                     d[k] = v.item()
                 except (ValueError, AttributeError):
+                    pass
+            # Parse string representations of lists/dicts
+            if isinstance(v, str) and v.startswith('[') or (isinstance(v, str) and v.startswith('{')):
+                try:
+                    parsed = ast.literal_eval(v)
+                    if isinstance(parsed, (list, dict)):
+                        d[k] = parsed
+                except:
                     pass
         return d
 
@@ -426,6 +451,225 @@ class PandasStore:
     def get_all_asset_rows(self) -> List[Dict]:
         return [self._row_to_dict(row) for _, row in self._assets.iterrows()]
 
+    # ——— Keyword Metrics ———
+    def upsert_keyword_metrics(self, data: Dict[str, Any]) -> None:
+        """Insert or update keyword metrics for opportunity scoring."""
+        keyword = (data.get("keyword") or "").strip().lower()
+        if not keyword:
+            return
+        now = datetime.utcnow()
+        
+        mask = self._keyword_metrics["keyword"] == keyword
+        row = {
+            "keyword": keyword,
+            "nb_results": data.get("nb_results", 0),
+            "unique_contributors": data.get("unique_contributors", 0),
+            "demand_score": data.get("demand_score", 0),
+            "competition_score": data.get("competition_score", 0),
+            "gap_score": data.get("gap_score", 50),
+            "freshness_score": data.get("freshness_score", 50),
+            "opportunity_score": data.get("opportunity_score", 0),
+            "trend": data.get("trend", "stable"),
+            "urgency": data.get("urgency", "medium"),
+            "related_searches": data.get("related_searches", []),
+            "categories": data.get("categories", []),
+            "scraped_at": data.get("scraped_at") or now,
+            "updated_at": now,
+        }
+        
+        if mask.any():
+            idx = self._keyword_metrics.loc[mask].index[0]
+            for k, v in row.items():
+                self._keyword_metrics.at[idx, k] = v
+        else:
+            row["created_at"] = now
+            new_row = pd.DataFrame([row])
+            if self._keyword_metrics.empty:
+                self._keyword_metrics = new_row.copy()
+            else:
+                self._keyword_metrics = pd.concat([self._keyword_metrics, new_row], ignore_index=True)
+        self._save()
+    
+    def get_keyword_metrics(self, keyword: str) -> Optional[Dict]:
+        """Get metrics for a specific keyword."""
+        keyword = (keyword or "").strip().lower()
+        mask = self._keyword_metrics["keyword"] == keyword
+        if not mask.any():
+            return None
+        return self._row_to_dict(self._keyword_metrics.loc[mask].iloc[0])
+    
+    def get_all_keyword_metrics(self, limit: int = 100) -> List[Dict]:
+        """Get all keyword metrics sorted by opportunity score."""
+        df = self._keyword_metrics.sort_values("opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def get_trending_keywords(self, limit: int = 20) -> List[Dict]:
+        """Get trending keywords (high demand + high opportunity)."""
+        df = self._keyword_metrics[self._keyword_metrics["trend"] == "up"]
+        if df.empty:
+            df = self._keyword_metrics
+        df = df.sort_values("opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def get_top_opportunities(self, limit: int = 20, min_score: float = 0) -> List[Dict]:
+        """Get top opportunity keywords."""
+        df = self._keyword_metrics[self._keyword_metrics["opportunity_score"] >= min_score]
+        df = df.sort_values("opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def search_keyword_metrics(self, query: str, limit: int = 20) -> List[Dict]:
+        """Search keyword metrics by term."""
+        query = (query or "").strip().lower()
+        if not query:
+            return []
+        df = self._keyword_metrics[self._keyword_metrics["keyword"].str.contains(query, case=False, na=False)]
+        df = df.sort_values("opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    # ——— Niche Scores ———
+    def upsert_niche_score(self, data: Dict[str, Any]) -> None:
+        """Insert or update niche/category score."""
+        name = (data.get("name") or "").strip()
+        if not name:
+            return
+        now = datetime.utcnow()
+        slug = data.get("slug") or name.lower().replace(" ", "-").replace("&", "and")
+        
+        mask = self._niche_scores["slug"] == slug
+        row = {
+            "name": name,
+            "slug": slug,
+            "total_assets": data.get("total_assets", 0),
+            "total_keywords": data.get("total_keywords", 0),
+            "avg_opportunity_score": data.get("avg_opportunity_score", 0),
+            "avg_demand_score": data.get("avg_demand_score", 0),
+            "avg_competition_score": data.get("avg_competition_score", 0),
+            "top_keywords": data.get("top_keywords", []),
+            "trend": data.get("trend", "stable"),
+            "scraped_at": data.get("scraped_at") or now,
+            "updated_at": now,
+        }
+        
+        if mask.any():
+            idx = self._niche_scores.loc[mask].index[0]
+            for k, v in row.items():
+                self._niche_scores.at[idx, k] = v
+        else:
+            row["created_at"] = now
+            new_row = pd.DataFrame([row])
+            if self._niche_scores.empty:
+                self._niche_scores = new_row.copy()
+            else:
+                self._niche_scores = pd.concat([self._niche_scores, new_row], ignore_index=True)
+        self._save()
+    
+    def get_niche_score(self, slug: str) -> Optional[Dict]:
+        """Get score for a specific niche."""
+        mask = self._niche_scores["slug"] == slug
+        if not mask.any():
+            return None
+        return self._row_to_dict(self._niche_scores.loc[mask].iloc[0])
+    
+    def get_all_niche_scores(self, limit: int = 50) -> List[Dict]:
+        """Get all niche scores sorted by opportunity."""
+        df = self._niche_scores.sort_values("avg_opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def get_niche_heatmap(self) -> List[Dict]:
+        """Get niche data formatted for heatmap visualization."""
+        df = self._niche_scores.sort_values("avg_opportunity_score", ascending=False)
+        return [
+            {
+                "name": row.get("name"),
+                "slug": row.get("slug"),
+                "score": row.get("avg_opportunity_score", 0),
+                "assets": row.get("total_assets", 0),
+                "competition": row.get("avg_competition_score", 0),
+            }
+            for _, row in df.iterrows()
+        ]
+    
+    def calculate_niche_scores_from_keywords(self) -> None:
+        """Recalculate niche scores by aggregating keyword metrics by category."""
+        if self._keyword_metrics.empty:
+            return
+        
+        # Get all categories from keyword metrics
+        category_data = {}
+        for _, row in self._keyword_metrics.iterrows():
+            categories = row.get("categories") or []
+            if isinstance(categories, str):
+                try:
+                    categories = eval(categories)
+                except:
+                    categories = []
+            
+            keyword = row.get("keyword", "")
+            opp_score = row.get("opportunity_score", 0)
+            demand_score = row.get("demand_score", 0)
+            comp_score = row.get("competition_score", 0)
+            
+            for cat in categories:
+                cat_name = cat.get("name") if isinstance(cat, dict) else str(cat)
+                if not cat_name:
+                    continue
+                
+                if cat_name not in category_data:
+                    category_data[cat_name] = {
+                        "keywords": [],
+                        "opp_scores": [],
+                        "demand_scores": [],
+                        "comp_scores": [],
+                    }
+                
+                category_data[cat_name]["keywords"].append(keyword)
+                category_data[cat_name]["opp_scores"].append(opp_score)
+                category_data[cat_name]["demand_scores"].append(demand_score)
+                category_data[cat_name]["comp_scores"].append(comp_score)
+        
+        # Also aggregate from asset categories
+        for _, row in self._asset_categories.iterrows():
+            cat_name = row.get("category_name")
+            if cat_name and cat_name not in category_data:
+                category_data[cat_name] = {
+                    "keywords": [],
+                    "opp_scores": [50],
+                    "demand_scores": [50],
+                    "comp_scores": [50],
+                }
+        
+        # Calculate niche scores
+        for cat_name, data in category_data.items():
+            if not data["opp_scores"]:
+                continue
+            
+            avg_opp = sum(data["opp_scores"]) / len(data["opp_scores"])
+            avg_demand = sum(data["demand_scores"]) / len(data["demand_scores"]) if data["demand_scores"] else 50
+            avg_comp = sum(data["comp_scores"]) / len(data["comp_scores"]) if data["comp_scores"] else 50
+            
+            # Count assets in this category
+            cat_assets = self._asset_categories[self._asset_categories["category_name"] == cat_name]
+            total_assets = len(cat_assets["asset_adobe_id"].unique()) if not cat_assets.empty else 0
+            
+            # Determine trend
+            if avg_demand >= 70:
+                trend = "up"
+            elif avg_demand >= 40:
+                trend = "stable"
+            else:
+                trend = "down"
+            
+            self.upsert_niche_score({
+                "name": cat_name,
+                "total_assets": total_assets,
+                "total_keywords": len(data["keywords"]),
+                "avg_opportunity_score": round(avg_opp, 2),
+                "avg_demand_score": round(avg_demand, 2),
+                "avg_competition_score": round(avg_comp, 2),
+                "top_keywords": data["keywords"][:10],
+                "trend": trend,
+            })
+    
     # ——— Pandas-specific: raw DataFrames for analysis ———
     def get_assets_df(self) -> pd.DataFrame:
         """Return the full assets DataFrame (read-only view; copy to modify)."""
@@ -433,3 +677,9 @@ class PandasStore:
 
     def get_searches_df(self) -> pd.DataFrame:
         return self._searches.copy()
+    
+    def get_keyword_metrics_df(self) -> pd.DataFrame:
+        return self._keyword_metrics.copy()
+    
+    def get_niche_scores_df(self) -> pd.DataFrame:
+        return self._niche_scores.copy()

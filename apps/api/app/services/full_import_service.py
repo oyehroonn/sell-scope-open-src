@@ -289,11 +289,26 @@ def full_import_csv(store, query: str, results: List[Dict[str, Any]], similar_re
             store.add_search_result(term, adobe_id, position=item.get("position", 0), page=item.get("search_page", 1))
             counts["search_results"] += 1
 
-            keywords_list = item.get("keywords_list") or (item.get("keywords") and [k.strip() for k in str(item["keywords"]).split("|") if k.strip()]) or []
+            keywords_list = item.get("keywords_list")
+            # Handle string representation of list
+            if isinstance(keywords_list, str):
+                try:
+                    import ast
+                    keywords_list = ast.literal_eval(keywords_list)
+                except:
+                    keywords_list = None
+            if not keywords_list and item.get("keywords"):
+                kw_val = item["keywords"]
+                if isinstance(kw_val, str):
+                    keywords_list = [k.strip() for k in kw_val.split("|") if k.strip()]
+                elif isinstance(kw_val, list):
+                    keywords_list = kw_val
+            keywords_list = keywords_list or []
             for kw_term in keywords_list[:100]:
-                if store.upsert_keyword(kw_term, "asset"):
-                    store.add_asset_keyword(adobe_id, kw_term, "meta")
-                    counts["asset_keywords"] += 1
+                if isinstance(kw_term, str) and len(kw_term) > 1:
+                    if store.upsert_keyword(kw_term, "asset"):
+                        store.add_asset_keyword(adobe_id, kw_term, "meta")
+                        counts["asset_keywords"] += 1
 
             cat_name = item.get("category")
             if cat_name:
@@ -322,11 +337,25 @@ def full_import_csv(store, query: str, results: List[Dict[str, Any]], similar_re
             store.add_similar(similar_to_adobe, adobe_id, rank=item.get("rank", 0))
             counts["similar_assets"] += 1
 
-            keywords_list = item.get("keywords_list") or (item.get("keywords") and [k.strip() for k in str(item["keywords"]).split("|") if k.strip()]) or []
+            keywords_list = item.get("keywords_list")
+            if isinstance(keywords_list, str):
+                try:
+                    import ast
+                    keywords_list = ast.literal_eval(keywords_list)
+                except:
+                    keywords_list = None
+            if not keywords_list and item.get("keywords"):
+                kw_val = item["keywords"]
+                if isinstance(kw_val, str):
+                    keywords_list = [k.strip() for k in kw_val.split("|") if k.strip()]
+                elif isinstance(kw_val, list):
+                    keywords_list = kw_val
+            keywords_list = keywords_list or []
             for kw_term in keywords_list[:50]:
-                if store.upsert_keyword(kw_term, "asset"):
-                    store.add_asset_keyword(adobe_id, kw_term, "meta")
-                    counts["asset_keywords"] += 1
+                if isinstance(kw_term, str) and len(kw_term) > 1:
+                    if store.upsert_keyword(kw_term, "asset"):
+                        store.add_asset_keyword(adobe_id, kw_term, "meta")
+                        counts["asset_keywords"] += 1
 
             if item.get("category"):
                 store.upsert_category(item["category"])
