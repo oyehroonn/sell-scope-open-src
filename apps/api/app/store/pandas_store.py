@@ -110,6 +110,15 @@ class PandasStore:
             "scoring", "visualizations", "errors",
             "scraped_at", "expires_at", "created_at", "updated_at"
         ])
+        # Saved keyword researches (user-saved with full deep analysis)
+        self._saved_researches: pd.DataFrame = pd.DataFrame(columns=[
+            "keyword", "analysis_depth", "is_opportunity", "saved_at",
+            "nb_results", "unique_contributors",
+            "demand_score", "competition_score", "gap_score", "freshness_score", "opportunity_score",
+            "trend", "urgency", "related_searches", "categories",
+            "deep_analysis",  # Full deep analysis data as JSON/dict
+            "created_at", "updated_at"
+        ])
 
     def load_all(self) -> None:
         """Load the full nested database from disk (pickle)."""
@@ -131,6 +140,7 @@ class PandasStore:
             self._niche_scores = data.get("niche_scores", self._niche_scores)
             self._contributor_profiles = data.get("contributor_profiles", self._contributor_profiles)
             self._market_analysis = data.get("market_analysis", self._market_analysis)
+            self._saved_researches = data.get("saved_researches", self._saved_researches)
             # Ensure columns exist
             for col in ASSET_COLUMNS:
                 if col not in self._assets.columns:
@@ -154,6 +164,7 @@ class PandasStore:
             "niche_scores": self._niche_scores,
             "contributor_profiles": self._contributor_profiles,
             "market_analysis": self._market_analysis,
+            "saved_researches": self._saved_researches,
         }
         with open(self._path, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -924,3 +935,100 @@ class PandasStore:
     
     def get_market_analysis_df(self) -> pd.DataFrame:
         return self._market_analysis.copy()
+    
+    def get_saved_researches_df(self) -> pd.DataFrame:
+        return self._saved_researches.copy()
+    
+    # ——— Saved Research Methods ———
+    def save_keyword_research(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Save a keyword research with full deep analysis."""
+        keyword = (data.get("keyword") or "").strip().lower()
+        if not keyword:
+            return {"error": "Keyword required"}
+        
+        now = datetime.utcnow()
+        
+        # Check if already saved
+        mask = self._saved_researches["keyword"] == keyword
+        
+        row = {
+            "keyword": keyword,
+            "analysis_depth": data.get("analysis_depth") or data.get("source", "simple").replace("deep-", "") or "simple",
+            "is_opportunity": data.get("is_opportunity", False),
+            "saved_at": data.get("saved_at") or now.isoformat(),
+            "nb_results": data.get("nb_results", 0),
+            "unique_contributors": data.get("unique_contributors", 0),
+            "demand_score": data.get("demand_score", 0),
+            "competition_score": data.get("competition_score", 0),
+            "gap_score": data.get("gap_score", 50),
+            "freshness_score": data.get("freshness_score", 50),
+            "opportunity_score": data.get("opportunity_score", 0),
+            "trend": data.get("trend", "stable"),
+            "urgency": data.get("urgency", "medium"),
+            "related_searches": data.get("related_searches", []),
+            "categories": data.get("categories", []),
+            "deep_analysis": data.get("deep_analysis"),  # Full deep analysis data
+            "updated_at": now,
+        }
+        
+        if mask.any():
+            idx = self._saved_researches.loc[mask].index[0]
+            for k, v in row.items():
+                self._saved_researches.at[idx, k] = v
+        else:
+            row["created_at"] = now
+            new_row = pd.DataFrame([row])
+            if self._saved_researches.empty:
+                self._saved_researches = new_row.copy()
+            else:
+                self._saved_researches = pd.concat([self._saved_researches, new_row], ignore_index=True)
+        
+        self._save()
+        return self._row_to_dict(self._saved_researches.loc[self._saved_researches["keyword"] == keyword].iloc[0])
+    
+    def get_saved_research(self, keyword: str) -> Optional[Dict]:
+        """Get a saved keyword research by keyword."""
+        keyword_lower = keyword.lower()
+        mask = self._saved_researches["keyword"] == keyword_lower
+        
+        if not mask.any():
+            return None
+        
+        return self._row_to_dict(self._saved_researches.loc[mask].iloc[0])
+    
+    def get_all_saved_researches(self, limit: int = 100) -> List[Dict]:
+        """Get all saved keyword researches."""
+        df = self._saved_researches.sort_values("saved_at", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def get_opportunity_researches(self, limit: int = 50) -> List[Dict]:
+        """Get all researches marked as opportunities."""
+        mask = self._saved_researches["is_opportunity"] == True
+        df = self._saved_researches[mask].sort_values("opportunity_score", ascending=False).head(limit)
+        return [self._row_to_dict(row) for _, row in df.iterrows()]
+    
+    def update_research_opportunity(self, keyword: str, is_opportunity: bool) -> bool:
+        """Toggle the opportunity status of a saved research."""
+        keyword_lower = keyword.lower()
+        mask = self._saved_researches["keyword"] == keyword_lower
+        
+        if not mask.any():
+            return False
+        
+        idx = self._saved_researches.loc[mask].index[0]
+        self._saved_researches.at[idx, "is_opportunity"] = is_opportunity
+        self._saved_researches.at[idx, "updated_at"] = datetime.utcnow()
+        self._save()
+        return True
+    
+    def delete_saved_research(self, keyword: str) -> bool:
+        """Delete a saved keyword research."""
+        keyword_lower = keyword.lower()
+        mask = self._saved_researches["keyword"] == keyword_lower
+        
+        if not mask.any():
+            return False
+        
+        self._saved_researches = self._saved_researches[~mask].reset_index(drop=True)
+        self._save()
+        return True

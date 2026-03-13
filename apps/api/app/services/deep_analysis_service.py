@@ -109,7 +109,7 @@ class DeepAnalysisService:
         if not scraper_dir.exists():
             return {
                 "keyword": keyword,
-                "error": "Scraper directory not found",
+                "error": f"Scraper directory not found: {scraper_dir}",
                 "scraped_at": datetime.utcnow().isoformat(),
             }
         
@@ -122,8 +122,12 @@ class DeepAnalysisService:
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             output_file = output_dir / f"deep_analysis_{safe_keyword}_{timestamp}.json"
             
+            # Use python3 directly instead of sys.executable (which might be the venv python)
+            import shutil
+            python_path = shutil.which("python3") or sys.executable or "python3"
+            
             cmd = [
-                sys.executable or "python3",
+                python_path,
                 "deep_analyzer.py",
                 keyword,
                 "-d", depth,
@@ -163,10 +167,18 @@ class DeepAnalysisService:
                 
                 return data
             
+            # Include more debug info in error
             return {
                 "keyword": keyword,
                 "error": "Analysis output not found",
-                "stderr": result.stderr[:500] if result.stderr else None,
+                "debug": {
+                    "python_path": python_path,
+                    "scraper_dir": str(scraper_dir),
+                    "output_file": str(output_file),
+                    "return_code": result.returncode,
+                    "stdout": result.stdout[:500] if result.stdout else None,
+                    "stderr": result.stderr[:1000] if result.stderr else None,
+                },
                 "scraped_at": datetime.utcnow().isoformat(),
             }
             

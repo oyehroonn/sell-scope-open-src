@@ -412,3 +412,185 @@ async def get_keyword_visualization_data(
         "source": "none",
         "message": "Run deep analysis to generate visualization data",
     }
+
+
+# ========== SAVED RESEARCHES ENDPOINTS ==========
+
+class SavedResearchRequest(BaseModel):
+    keyword: str
+    nb_results: int = 0
+    unique_contributors: int = 0
+    demand_score: float = 0
+    competition_score: float = 0
+    gap_score: float = 50
+    freshness_score: float = 50
+    opportunity_score: float = 0
+    trend: str = "stable"
+    urgency: str = "medium"
+    related_searches: List[str] = []
+    categories: List[dict] = []
+    is_opportunity: bool = False
+    source: Optional[str] = None
+    deep_analysis: Optional[Dict[str, Any]] = None
+
+
+class SavedResearchResponse(BaseModel):
+    keyword: str
+    analysis_depth: str = "simple"
+    is_opportunity: bool = False
+    saved_at: str
+    nb_results: int = 0
+    unique_contributors: int = 0
+    demand_score: float = 0
+    competition_score: float = 0
+    gap_score: float = 50
+    freshness_score: float = 50
+    opportunity_score: float = 0
+    trend: str = "stable"
+    urgency: str = "medium"
+    related_searches: List[str] = []
+    categories: List[dict] = []
+    deep_analysis: Optional[Dict[str, Any]] = None
+
+
+@router.post("/saved-researches", response_model=SavedResearchResponse)
+async def save_keyword_research(
+    request: SavedResearchRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Save a keyword research with its full analysis data.
+    
+    This stores the complete deep analysis results in the database
+    so users can review their research later without re-scraping.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    
+    data = request.dict()
+    # Extract analysis depth from source if provided
+    if data.get("source"):
+        if "deep-" in data["source"]:
+            data["analysis_depth"] = data["source"].replace("deep-", "")
+        else:
+            data["analysis_depth"] = data["source"]
+    
+    result = store.save_keyword_research(data)
+    
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    return SavedResearchResponse(**result)
+
+
+@router.get("/saved-researches", response_model=List[SavedResearchResponse])
+async def get_saved_researches(
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get all saved keyword researches.
+    
+    Returns researches sorted by saved_at date (most recent first).
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    researches = store.get_all_saved_researches(limit)
+    
+    return [SavedResearchResponse(**r) for r in researches]
+
+
+@router.get("/saved-researches/{keyword}", response_model=SavedResearchResponse)
+async def get_saved_research(
+    keyword: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get a specific saved keyword research by keyword.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    research = store.get_saved_research(keyword)
+    
+    if not research:
+        raise HTTPException(status_code=404, detail=f"No saved research found for '{keyword}'")
+    
+    return SavedResearchResponse(**research)
+
+
+@router.delete("/saved-researches/{keyword}")
+async def delete_saved_research(
+    keyword: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete a saved keyword research.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    success = store.delete_saved_research(keyword)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail=f"No saved research found for '{keyword}'")
+    
+    return {"message": f"Research for '{keyword}' deleted successfully"}
+
+
+@router.patch("/saved-researches/{keyword}/opportunity")
+async def toggle_opportunity_status(
+    keyword: str,
+    is_opportunity: bool = Query(..., description="Whether to mark as opportunity"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Toggle the opportunity status of a saved research.
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    success = store.update_research_opportunity(keyword, is_opportunity)
+    
+    if not success:
+        raise HTTPException(status_code=404, detail=f"No saved research found for '{keyword}'")
+    
+    return {"keyword": keyword, "is_opportunity": is_opportunity}
+
+
+@router.get("/opportunities", response_model=List[SavedResearchResponse])
+async def get_opportunities(
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get all keyword researches marked as opportunities.
+    
+    Returns researches sorted by opportunity score (highest first).
+    """
+    if not (getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False)):
+        raise HTTPException(status_code=501, detail="Saved researches requires Pandas store")
+    
+    from app.store import get_store
+    
+    store = get_store()
+    opportunities = store.get_opportunity_researches(limit)
+    
+    return [SavedResearchResponse(**r) for r in opportunities]

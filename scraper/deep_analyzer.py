@@ -88,7 +88,7 @@ class DeepAnalyzer:
         self._setup_driver()
     
     def _setup_driver(self):
-        """Initialize Selenium WebDriver"""
+        """Initialize Selenium WebDriver with English locale settings"""
         options = Options()
         
         if self.headless:
@@ -103,15 +103,25 @@ class DeepAnalyzer:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
         
+        # Force English (US) locale to avoid Spanish/localized pages
+        options.add_argument("--lang=en-US")
+        options.add_argument("--accept-language=en-US,en;q=0.9")
+        
         chromedriver_path = find_chromedriver()
         service = Service(chromedriver_path)
         
         self.driver = webdriver.Chrome(service=service, options=options)
+        
+        # Override navigator properties for English locale
         self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                Object.defineProperty(navigator, 'language', {get: () => 'en-US'});
+            """
         })
         self.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
-        logger.info("WebDriver initialized for deep analysis")
+        logger.info("WebDriver initialized for deep analysis (English locale)")
     
     def _random_delay(self, min_delay: float = None, max_delay: float = None):
         """Add random delay to avoid detection"""
@@ -195,15 +205,17 @@ class DeepAnalyzer:
             
             # Step 3: Contributor Profiles (60%)
             if config["scrape_contributors"]:
-                # Extract contributor IDs from asset_details (where we actually get them from detail pages)
-                # Fall back to assets if asset_details is empty
+                # Extract contributor info from asset_details (where we get IDs and names from detail pages)
                 source_assets = analysis.get("asset_details") or analysis.get("assets", [])
-                contributor_ids = self._extract_unique_contributors(source_assets)
-                logger.info(f"Extracted {len(contributor_ids)} unique contributor IDs from {len(source_assets)} assets")
+                contributors_info = self._extract_unique_contributors(source_assets)
+                num_to_profile = min(len(contributors_info), config['max_contributors'])
                 
-                self._report_progress("contributors", 60, f"Profiling {min(len(contributor_ids), config['max_contributors'])} contributors...")
+                logger.info(f"Extracted {len(contributors_info)} unique contributors from {len(source_assets)} assets")
+                self._report_progress("contributors", 60, f"Profiling {num_to_profile} contributors...")
+                
                 profiles = self._scrape_contributor_profiles(
-                    contributor_ids[:config["max_contributors"]]
+                    contributors_info[:num_to_profile],
+                    asset_details=analysis.get("asset_details", [])
                 )
                 analysis["contributor_profiles"] = profiles
             
@@ -295,48 +307,85 @@ class DeepAnalyzer:
         return results
     
     def _extract_total_results(self) -> int:
-        """Extract total number of results"""
+        """Extract total number of results from Adobe Stock search page
+        
+        Adobe Stock displays results like:
+        - "58,260 results for empanadas in all"
+        - "42,925 results for empanadas in images"
+        - In Spanish: "58.260 resultados para empanadas"
+        """
         try:
-            # Try specific elements
-            selectors = [
-                "[data-testid='search-results-count']",
-                "[class*='ResultsCount']",
-                "[class*='results-count']",
-            ]
-            
-            for selector in selectors:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
-                    match = re.search(r'([\d,]+)', el.text)
-                    if match:
-                        return int(match.group(1).replace(",", ""))
-            
-            # Try page text
             page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            page_source = self.driver.page_source
+            
+            # Pattern 1: "X results for Y" or "X resultados para Y" (most reliable)
+            # Matches: "58,260 results for empanadas" or "58.260 resultados para"
             patterns = [
-                r'([\d,]+)\s*(?:results?|assets?|images?)',
-                r'(?:of|showing)\s*([\d,]+)',
+                r'#?\s*([\d,\.]+)\s*results?\s+for\s+',  # English: "58,260 results for"
+                r'#?\s*([\d,\.]+)\s*resultados?\s+para\s+',  # Spanish: "58.260 resultados para"
+                r'([\d,\.]+)\s*results?\s+for\s+\w+\s+in\s+',  # "X results for Y in all"
             ]
             
             for pattern in patterns:
                 match = re.search(pattern, page_text, re.IGNORECASE)
                 if match:
-                    count = int(match.group(1).replace(",", ""))
+                    # Handle both comma (English) and period (Spanish/European) as thousands separator
+                    num_str = match.group(1).replace(",", "").replace(".", "")
+                    count = int(num_str)
                     if count > 0:
+                        logger.info(f"Found total results via pattern: {count}")
                         return count
             
-            # Try JSON in page source
-            page_source = self.driver.page_source
+            # Pattern 2: Look in page title "Browse X Stock Photos"
+            title_patterns = [
+                r'Browse\s+([\d,\.]+)\s+Stock',  # "Browse 58,260 Stock Photos"
+                r'Explorar\s+([\d,\.]+)',  # Spanish
+            ]
+            
+            for pattern in title_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    num_str = match.group(1).replace(",", "").replace(".", "")
+                    count = int(num_str)
+                    if count > 0:
+                        logger.info(f"Found total results in title: {count}")
+                        return count
+            
+            # Pattern 3: Try JSON embedded in page source
             json_patterns = [
                 r'"nb_results":\s*(\d+)',
                 r'"totalResults":\s*(\d+)',
                 r'"total_count":\s*(\d+)',
+                r'"numResults":\s*(\d+)',
+                r'"resultCount":\s*(\d+)',
             ]
             
             for pattern in json_patterns:
                 match = re.search(pattern, page_source)
                 if match:
-                    return int(match.group(1))
+                    count = int(match.group(1))
+                    if count > 0:
+                        logger.info(f"Found total results in JSON: {count}")
+                        return count
+            
+            # Pattern 4: Generic number followed by results/resultados
+            generic_patterns = [
+                r'([\d,\.]+)\s*(?:results?|resultados?)',
+                r'(?:showing|mostrando)\s*([\d,\.]+)',
+            ]
+            
+            for pattern in generic_patterns:
+                matches = re.findall(pattern, page_text, re.IGNORECASE)
+                for num_str in matches:
+                    num_str = num_str.replace(",", "").replace(".", "")
+                    try:
+                        count = int(num_str)
+                        # Only accept if it looks like a reasonable result count (> 10)
+                        if count > 10:
+                            logger.info(f"Found total results via generic pattern: {count}")
+                            return count
+                    except ValueError:
+                        continue
                     
         except Exception as e:
             logger.warning(f"Could not extract total results: {e}")
@@ -574,7 +623,7 @@ class DeepAnalyzer:
             driver = None
             
             try:
-                # Create a new browser instance for this worker
+                # Create a new browser instance for this worker with English locale
                 options = Options()
                 if self.headless:
                     options.add_argument("--headless=new")
@@ -586,12 +635,25 @@ class DeepAnalyzer:
                 options.add_argument("--disable-blink-features=AutomationControlled")
                 options.add_experimental_option("excludeSwitches", ["enable-automation"])
                 
+                # Force English (US) locale
+                options.add_argument("--lang=en-US")
+                options.add_argument("--accept-language=en-US,en;q=0.9")
+                
                 chromedriver_path = find_chromedriver()
                 if chromedriver_path:
                     service = Service(chromedriver_path)
                     driver = webdriver.Chrome(service=service, options=options)
                 else:
                     driver = webdriver.Chrome(options=options)
+                
+                # Override navigator for English locale
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                    "source": """
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                        Object.defineProperty(navigator, 'language', {get: () => 'en-US'});
+                    """
+                })
                 
                 driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
                 
@@ -689,49 +751,174 @@ class DeepAnalyzer:
                     continue
             
             # ========== PRICE EXTRACTION ==========
+            # Adobe Stock shows prices like "Extended License (US$79.99)" or "US$9.99"
+            # Also handles: "$79.99", "€79,99", "79,99 €", "79.99 USD"
             price_patterns = [
-                r'(?:buy|download|license|price)[^$]*\$(\d+(?:\.\d{2})?)',
-                r'from\s+\$(\d+(?:\.\d{2})?)',
-                r'\$(\d+(?:\.\d{2})?)\s*(?:USD|for)',
+                r'Extended\s+License\s*\(?\s*(?:US)?\$\s*([\d,\.]+)',  # "Extended License (US$79.99)"
+                r'Standard\s+License\s*\(?\s*(?:US)?\$\s*([\d,\.]+)',  # "Standard License (US$9.99)"
+                r'(?:US)?\$\s*([\d]+(?:\.\d{2})?)',  # "US$79.99" or "$79.99"
+                r'([\d]+(?:,\d{2})?)\s*€',  # "79,99 €" European format
+                r'€\s*([\d]+(?:,\d{2})?)',  # "€79,99"
+                r'([\d]+(?:\.\d{2})?)\s*USD',  # "79.99 USD"
+                r'(?:price|precio)[:\s]*([\d]+(?:\.\d{2})?)',  # "Price: 79.99"
             ]
+            
             for pattern in price_patterns:
                 match = re.search(pattern, page_text, re.IGNORECASE)
                 if match:
                     try:
-                        price_val = float(match.group(1))
-                        if 5 <= price_val <= 500:
+                        price_str = match.group(1).replace(",", ".")  # Handle European format
+                        price_val = float(price_str)
+                        if 1 <= price_val <= 1000:  # Reasonable price range
                             detail["price"] = price_val
+                            logger.debug(f"Found price: ${price_val}")
                             break
                     except:
                         continue
             
+            # Also try to extract license type
+            if "extended license" in page_text.lower() or "licencia extendida" in page_text.lower():
+                detail["license_type"] = "Extended"
+            elif "standard license" in page_text.lower() or "licencia estándar" in page_text.lower():
+                detail["license_type"] = "Standard"
+            
             # ========== CONTENT TYPE FLAGS ==========
-            # Premium
-            detail["is_premium"] = any(ind in page_source for ind in [
-                "class=\"premium", "premium-badge", "data-premium=\"true\""
-            ])
+            page_text_lower = page_text.lower()
+            page_source_lower = page_source.lower() if page_source else ""
             
-            # Editorial
-            detail["is_editorial"] = any(ind in page_source for ind in [
-                "editorial-badge", "editorial use only", "for editorial use"
-            ])
+            # Premium - look for specific premium badges/labels
+            # Adobe Stock shows "Premium" in license type or collection badges
+            premium_text_markers = [
+                "premium collection", "premium content", "colección premium",
+                "contenido premium", "premium asset", "premium license",
+                "licencia premium", "premium images"
+            ]
+            premium_source_markers = [
+                "premium-badge", "premium-collection", "is-premium=\"true\"",
+                "ispremium\":true", "ispremium\": true", "asset-premium",
+                '"premium":true', '"premium": true', "data-premium",
+                "premium-icon", "premium-label"
+            ]
+            detail["is_premium"] = (
+                any(marker in page_text_lower for marker in premium_text_markers) or
+                any(ind in page_source_lower for ind in premium_source_markers)
+            )
             
-            # AI Generated
-            detail["is_ai_generated"] = any(ind in page_source for ind in [
-                "ai-generated-badge", "aiGenerated", '"isAiGenerated":true'
-            ])
+            # Editorial - check for editorial license type
+            # Adobe Stock clearly marks editorial content with "Editorial Use Only"
+            editorial_text_markers = [
+                "editorial use only", "for editorial use", "editorial license",
+                "uso editorial", "licencia editorial", "solo uso editorial",
+                "editorial content", "contenido editorial", "not for commercial use"
+            ]
+            editorial_source_markers = [
+                "editorial-badge", "is-editorial", "iseditorial\":true",
+                "iseditorial\": true", "editorial-use-only", "license-editorial",
+                '"editorial":true', '"editorial": true', "data-editorial",
+                "editorial-icon", "editorial-label"
+            ]
+            detail["is_editorial"] = (
+                any(marker in page_text_lower for marker in editorial_text_markers) or
+                any(ind in page_source_lower for ind in editorial_source_markers)
+            )
+            
+            # AI Generated - check for AI generation markers
+            # Adobe Firefly and other AI-generated content markers
+            ai_text_markers = [
+                "generated by ai", "ai-generated", "created with ai", 
+                "generative ai", "generated with firefly", "adobe firefly",
+                "generado por ia", "creado con ia", "ai generated",
+                "made with ai", "artificial intelligence", "generative content"
+            ]
+            ai_source_markers = [
+                "ai-generated-badge", "aigenerated\":true", "isgenerated\":true",
+                "generated-by-ai", "firefly-generated", '"ai_generated":true',
+                '"aiGenerated":true', "data-ai-generated", "generative-ai"
+            ]
+            detail["is_ai_generated"] = (
+                any(marker in page_text_lower for marker in ai_text_markers) or
+                any(ind in page_source_lower for ind in ai_source_markers)
+            )
+            
+            # Determine license type
+            if detail["is_premium"]:
+                detail["license_type"] = "Premium"
+            elif detail["is_editorial"]:
+                detail["license_type"] = "Editorial"
+            elif any(m in page_text_lower for m in ["standard license", "licencia estándar", "standard or extended"]):
+                detail["license_type"] = "Standard"
+            else:
+                detail["license_type"] = "Standard"  # Default
+            
+            logger.debug(f"Content flags: premium={detail['is_premium']}, editorial={detail['is_editorial']}, ai={detail['is_ai_generated']}")
             
             # ========== KEYWORDS ==========
+            # Adobe Stock shows "SIMILAR KEYWORDS" section with clickable keyword links
             keywords = []
             try:
-                kw_elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='k=']")[:20]
-                for el in kw_elements:
-                    text = el.text.strip()
-                    if text and len(text) > 1 and len(text) < 50:
-                        keywords.append(text)
-            except:
-                pass
-            detail["keywords"] = keywords[:15]
+                # Method 1: Look for keyword links (href contains search?k= or k=)
+                kw_selectors = [
+                    "a[href*='search?k=']",  # Direct search links
+                    "a[href*='&k=']",  # Search links with other params
+                    "a[href*='?k=']",  # Simple search links
+                    "[class*='keyword'] a",
+                    "[class*='Keyword'] a",
+                    "[class*='tag'] a",
+                    "[class*='Tag'] a",
+                ]
+                
+                for selector in kw_selectors:
+                    try:
+                        kw_elements = driver.find_elements(By.CSS_SELECTOR, selector)[:50]
+                        for el in kw_elements:
+                            text = el.text.strip().lower()
+                            href = el.get_attribute("href") or ""
+                            # Filter out navigation links and keep only keyword-like text
+                            if (text and len(text) > 1 and len(text) < 50 
+                                and text not in keywords
+                                and text not in ["all", "images", "videos", "audio", "templates", "3d", "free", "premium"]
+                                and "stock.adobe.com" not in text
+                                and not text.startswith("http")):
+                                keywords.append(text)
+                    except:
+                        continue
+                
+                # Method 2: Extract from "SIMILAR KEYWORDS" section text
+                if len(keywords) < 5:
+                    try:
+                        # Look for the keywords section in page text
+                        kw_section_match = re.search(
+                            r'(?:SIMILAR KEYWORDS|KEYWORDS|PALABRAS CLAVE)[:\s]*([\w\s,]+?)(?:\n\n|$)',
+                            page_text, re.IGNORECASE
+                        )
+                        if kw_section_match:
+                            kw_text = kw_section_match.group(1)
+                            # Split by common delimiters
+                            for kw in re.split(r'[,\n]+', kw_text):
+                                kw = kw.strip().lower()
+                                if kw and len(kw) > 1 and len(kw) < 50 and kw not in keywords:
+                                    keywords.append(kw)
+                    except:
+                        pass
+                
+                # Method 3: Parse from page source JSON if available
+                if len(keywords) < 5:
+                    try:
+                        kw_json_match = re.search(r'"keywords":\s*\[(.*?)\]', driver.page_source)
+                        if kw_json_match:
+                            kw_json = kw_json_match.group(1)
+                            for kw in re.findall(r'"([^"]+)"', kw_json):
+                                kw = kw.strip().lower()
+                                if kw and len(kw) > 1 and len(kw) < 50 and kw not in keywords:
+                                    keywords.append(kw)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                logger.debug(f"Keyword extraction error: {e}")
+            
+            detail["keywords"] = keywords[:30]  # Keep up to 30 keywords
+            logger.debug(f"Extracted {len(keywords)} keywords")
             
             # ========== DIMENSIONS ==========
             dim_match = re.search(r'(\d{3,5})\s*[x×]\s*(\d{3,5})', page_text)
@@ -741,16 +928,54 @@ class DeepAnalyzer:
                 detail["orientation"] = "horizontal" if detail["width"] > detail["height"] else \
                                         "vertical" if detail["height"] > detail["width"] else "square"
             
-            # ========== UPLOAD DATE ==========
-            date_patterns = [
-                r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
-                r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})',
-            ]
-            for pattern in date_patterns:
+            # ========== FILE FORMAT ==========
+            format_patterns = [r'\b(JPEG|JPG|PNG|EPS|AI|SVG|MP4|MOV|PSD|TIFF|GIF)\b']
+            for pattern in format_patterns:
                 match = re.search(pattern, page_text, re.IGNORECASE)
                 if match:
-                    detail["upload_date"] = match.group(1)
+                    detail["file_format"] = match.group(1).upper()
                     break
+            
+            # ========== UPLOAD DATE (Enhanced) ==========
+            # Look for date patterns in various formats
+            date_patterns = [
+                # ISO format
+                r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',
+                # US format: Month DD, YYYY
+                r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?)\s+(\d{1,2}),?\s+(\d{4})',
+                # European format: DD Month YYYY
+                r'(\d{1,2})\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?)\s+(\d{4})',
+                # Numeric US: MM/DD/YYYY
+                r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})',
+            ]
+            
+            months_map = {
+                'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+                'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+                'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+            }
+            
+            for i, pattern in enumerate(date_patterns):
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    try:
+                        if i == 0:  # ISO: YYYY-MM-DD
+                            year, month, day = match.groups()
+                            detail["upload_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        elif i == 1:  # US text: Month DD, YYYY
+                            month_str, day, year = match.groups()
+                            month = months_map.get(month_str[:3].lower(), '01')
+                            detail["upload_date"] = f"{year}-{month}-{day.zfill(2)}"
+                        elif i == 2:  # European: DD Month YYYY  
+                            day, month_str, year = match.groups()
+                            month = months_map.get(month_str[:3].lower(), '01')
+                            detail["upload_date"] = f"{year}-{month}-{day.zfill(2)}"
+                        elif i == 3:  # US numeric: MM/DD/YYYY
+                            month, day, year = match.groups()
+                            detail["upload_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        break
+                    except:
+                        continue
             
             # ========== SIMILAR ASSETS ==========
             similar_ids = []
@@ -889,64 +1114,58 @@ class DeepAnalyzer:
                     detail["credits"] = int(match.group(1))
                     break
             
-            # ========== PREMIUM/EDITORIAL/AI DETECTION (ACCURATE) ==========
-            # Check for actual badges and indicators, not just text mentions
+            # ========== PREMIUM/EDITORIAL/AI DETECTION (FIXED) ==========
+            # Use both page_source (lowercase) and page_text for detection
+            # Also check for visible text labels which are more reliable
             
-            # Premium detection
-            premium_indicators = [
-                "class=\"premium",
-                "class='premium",
-                "premium-badge",
-                "premium-icon",
-                "data-premium=\"true\"",
-                "ispremium",
-            ]
-            detail["is_premium"] = any(ind in page_source for ind in premium_indicators)
+            # Premium detection - check visible text first (most reliable)
+            detail["is_premium"] = False
+            premium_text_markers = ["premium", "premium collection", "premium content"]
+            if any(marker in page_text.lower() for marker in premium_text_markers):
+                # Verify it's actually a premium badge/label, not just mentioned in description
+                try:
+                    premium_els = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "[class*='remium'], [class*='PREMIUM'], [data-premium], span:contains('Premium')")
+                    if premium_els:
+                        detail["is_premium"] = True
+                except:
+                    pass
             
-            # Also check visible text for Premium label
+            # Also check page source for premium indicators
             if not detail["is_premium"]:
-                try:
-                    premium_badges = self.driver.find_elements(By.CSS_SELECTOR, 
-                        "[class*='premium'], [class*='Premium'], [data-testid*='premium']")
-                    detail["is_premium"] = len(premium_badges) > 0
-                except:
-                    pass
+                premium_source_indicators = [
+                    "premium-badge", "premium-icon", "premiumcollection",
+                    "ispremium", "is-premium", "premium-asset"
+                ]
+                detail["is_premium"] = any(ind in page_source for ind in premium_source_indicators)
             
-            # Editorial detection - more specific
-            editorial_indicators = [
-                "editorial-badge",
-                "editorial-icon",
-                "class=\"editorial",
-                "class='editorial",
-                "editorial use only",
-                "for editorial use",
-                "iseditorial",
-            ]
-            detail["is_editorial"] = any(ind in page_source for ind in editorial_indicators)
+            # Editorial detection - check visible text
+            detail["is_editorial"] = False
+            editorial_text_markers = ["editorial use only", "for editorial use only", "editorial license"]
+            if any(marker in page_text.lower() for marker in editorial_text_markers):
+                detail["is_editorial"] = True
             
-            # AI Generated detection - more specific to avoid false positives
-            # Only flag if explicit AI/generated badge indicators present
-            ai_indicators = [
-                "ai-generated-badge",
-                "aiGenerated",  # camelCase class names
-                "ai_generated",  # snake_case
-                'class="ai-generated',
-                "class='ai-generated",
-                "generated-by-ai",
-                "data-ai-generated",
-                '"isAiGenerated":true',
-                "generative-ai-badge",
-            ]
-            detail["is_ai_generated"] = any(ind in page_source for ind in ai_indicators)
+            # Also check page source
+            if not detail["is_editorial"]:
+                editorial_source_indicators = [
+                    "editorial-badge", "editorial-use", "editorialuse",
+                    "iseditorial", "is-editorial"
+                ]
+                detail["is_editorial"] = any(ind in page_source for ind in editorial_source_indicators)
             
-            # Additional check for visible AI badge
+            # AI Generated detection - look for specific Adobe markers
+            detail["is_ai_generated"] = False
+            ai_text_markers = ["generated by ai", "ai-generated", "generative ai", "created with ai"]
+            if any(marker in page_text.lower() for marker in ai_text_markers):
+                detail["is_ai_generated"] = True
+            
+            # Check page source for AI indicators
             if not detail["is_ai_generated"]:
-                try:
-                    ai_badges = self.driver.find_elements(By.CSS_SELECTOR, 
-                        "[class*='ai-generated'], [class*='AiGenerated'], [data-ai-generated='true']")
-                    detail["is_ai_generated"] = len(ai_badges) > 0
-                except:
-                    pass
+                ai_source_indicators = [
+                    "ai-generated", "aigenerated", "isgenerated",
+                    "generative-ai", "ai-content"
+                ]
+                detail["is_ai_generated"] = any(ind in page_source for ind in ai_source_indicators)
             
             # ========== KEYWORDS EXTRACTION ==========
             detail["keywords"] = self._extract_asset_keywords()
@@ -1073,43 +1292,183 @@ class DeepAnalyzer:
         
         return keywords[:30]
     
-    def _extract_unique_contributors(self, assets: List[Dict]) -> List[str]:
-        """Extract unique contributor IDs from assets - checks both search results and detail pages"""
+    def _extract_unique_contributors(self, assets: List[Dict]) -> List[Dict[str, Any]]:
+        """Extract unique contributor info from assets - returns dict with ID, name, and URL"""
         contributors = []
         seen = set()
         
         for asset in assets:
             cid = asset.get("contributor_id")
-            if cid and cid not in seen:
-                seen.add(cid)
-                contributors.append(cid)
+            if cid and str(cid) not in seen:
+                seen.add(str(cid))
+                # Get the actual URL from the asset page (includes name slug)
+                url = asset.get("contributor_url")
+                # Clean the URL - remove query params that might cause issues
+                if url and "?" in url:
+                    url = url.split("?")[0]
+                
+                contributors.append({
+                    "id": str(cid),
+                    "name": asset.get("contributor_name"),
+                    "url": url,
+                })
         
         logger.info(f"Found {len(contributors)} unique contributors from {len(assets)} assets")
         return contributors
     
-    def _scrape_contributor_profiles(self, contributor_ids: List[str]) -> List[Dict[str, Any]]:
-        """Scrape profiles for multiple contributors - ENHANCED VERSION"""
-        profiles = []
+    def _scrape_contributor_profiles(self, contributors: List[Dict], asset_details: List[Dict] = None) -> List[Dict[str, Any]]:
+        """Build contributor profiles from asset data and try to get portfolio info
         
-        for i, cid in enumerate(contributor_ids):
+        Since Adobe Stock contributor pages often return 403/404, we:
+        1. Build profiles from asset detail data we already have
+        2. Count how many assets each contributor has in our sample
+        3. Try to visit contributor search to get total portfolio size
+        
+        Args:
+            contributors: List of dicts with 'id', 'name', 'url' from asset details
+            asset_details: List of scraped asset details to analyze
+        """
+        profiles = []
+        asset_details = asset_details or []
+        
+        # Handle both old format (list of IDs) and new format (list of dicts)
+        if contributors and isinstance(contributors[0], str):
+            contributors = [{"id": cid, "name": None, "url": None} for cid in contributors]
+        
+        # Build a map of contributor stats from asset details
+        contributor_stats = {}
+        for asset in asset_details:
+            cid = str(asset.get("contributor_id", ""))
+            if not cid:
+                continue
+            
+            if cid not in contributor_stats:
+                contributor_stats[cid] = {
+                    "asset_count": 0,
+                    "premium_count": 0,
+                    "editorial_count": 0,
+                    "ai_count": 0,
+                    "keywords": [],
+                    "categories": [],
+                    "prices": [],
+                }
+            
+            stats = contributor_stats[cid]
+            stats["asset_count"] += 1
+            if asset.get("is_premium"):
+                stats["premium_count"] += 1
+            if asset.get("is_editorial"):
+                stats["editorial_count"] += 1
+            if asset.get("is_ai_generated"):
+                stats["ai_count"] += 1
+            if asset.get("keywords"):
+                stats["keywords"].extend(asset["keywords"][:10])
+            if asset.get("price"):
+                stats["prices"].append(asset["price"])
+        
+        for i, contrib in enumerate(contributors):
+            cid = contrib.get("id") or str(contrib)
+            name = contrib.get("name") if isinstance(contrib, dict) else None
+            url = contrib.get("url") if isinstance(contrib, dict) else None
+            
+            # Get stats from our scraped assets
+            stats = contributor_stats.get(str(cid), {})
+            sample_count = stats.get("asset_count", 0)
+            premium_count = stats.get("premium_count", 0)
+            
+            # Calculate premium ratio from sample
+            premium_ratio = (premium_count / sample_count * 100) if sample_count > 0 else 0.0
+            
+            # Try to get total portfolio size by visiting contributor search
+            total_assets = 0
             try:
-                logger.info(f"Scraping contributor {i+1}/{len(contributor_ids)}: {cid}")
-                profile = self._scrape_contributor_profile(cid)
-                profiles.append(profile)
-                self._random_delay(1.5, 3)
+                # Search for assets by this contributor
+                search_url = f"https://stock.adobe.com/search?creator_id={cid}"
+                self.driver.get(search_url)
+                time.sleep(2)
+                
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                
+                # Look for result count
+                count_patterns = [
+                    r'#?\s*([\d,\.]+)\s*results?\s+for',
+                    r'([\d,\.]+)\s*(?:results?|assets?|images?)',
+                    r'Browse\s+([\d,\.]+)',
+                ]
+                
+                for pattern in count_patterns:
+                    match = re.search(pattern, page_text, re.IGNORECASE)
+                    if match:
+                        num_str = match.group(1).replace(",", "").replace(".", "")
+                        total_assets = int(num_str)
+                        if total_assets > 0:
+                            logger.info(f"Found {total_assets} assets for contributor {name or cid}")
+                            break
+                
             except Exception as e:
-                logger.warning(f"Error scraping contributor {cid}: {e}")
-                profiles.append({"adobe_id": cid, "error": str(e)})
+                logger.debug(f"Could not get portfolio size for {cid}: {e}")
+            
+            # If we couldn't get total, use sample count as minimum
+            if total_assets == 0:
+                total_assets = sample_count
+            
+            # Determine competition level based on portfolio size
+            if total_assets >= 10000:
+                competition_level = "high"
+            elif total_assets >= 1000:
+                competition_level = "medium"
+            elif total_assets >= 100:
+                competition_level = "low"
+            else:
+                competition_level = "emerging"
+            
+            # Extract top niches from keywords
+            keyword_counts = {}
+            for kw in stats.get("keywords", []):
+                kw_lower = kw.lower()
+                keyword_counts[kw_lower] = keyword_counts.get(kw_lower, 0) + 1
+            top_niches = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            niches = [kw for kw, _ in top_niches]
+            
+            profile = {
+                "adobe_id": str(cid),
+                "name": name,
+                "profile_url": url or f"https://stock.adobe.com/contributor/{cid}",
+                "total_assets": total_assets,
+                "sample_assets_in_search": sample_count,
+                "premium_ratio": round(premium_ratio, 1),
+                "editorial_ratio": round((stats.get("editorial_count", 0) / sample_count * 100) if sample_count > 0 else 0, 1),
+                "ai_ratio": round((stats.get("ai_count", 0) / sample_count * 100) if sample_count > 0 else 0, 1),
+                "avg_price": round(sum(stats.get("prices", [])) / len(stats["prices"]), 2) if stats.get("prices") else None,
+                "competition_level": competition_level,
+                "niches": niches,
+                "scraped_at": datetime.utcnow().isoformat(),
+            }
+            
+            profiles.append(profile)
+            logger.info(f"Built profile {i+1}/{len(contributors)}: {name or cid} - {total_assets} assets, {premium_ratio:.1f}% premium")
         
         return profiles
     
-    def _scrape_contributor_profile(self, contributor_id: str) -> Dict[str, Any]:
-        """Scrape a single contributor profile - ENHANCED VERSION with full portfolio analysis"""
+    def _scrape_contributor_profile(self, contributor_id: str, name_hint: str = None, url_hint: str = None) -> Dict[str, Any]:
+        """Scrape a single contributor profile - ENHANCED VERSION with full portfolio analysis
+        
+        Args:
+            contributor_id: Adobe contributor ID
+            name_hint: Optional name already scraped from asset detail page
+            url_hint: Optional URL from asset detail page (includes name slug)
+        """
+        # Use the URL from asset page if available (has name slug), otherwise construct one
+        if url_hint:
+            clean_url = url_hint.split("?")[0]  # Remove query params
+        else:
+            clean_url = f"https://stock.adobe.com/contributor/{contributor_id}"
+        
         profile = {
-            "adobe_id": contributor_id,
-            "name": None,
-            "profile_url": f"{CONTRIBUTOR_URL}/{contributor_id}",
-            "portfolio_url": None,
+            "adobe_id": str(contributor_id),
+            "name": name_hint,  # Use the name we already have from asset page
+            "profile_url": clean_url,
+            "portfolio_url": clean_url,
             "total_assets": 0,
             "total_photos": 0,
             "total_vectors": 0,
@@ -1130,8 +1489,8 @@ class DeepAnalyzer:
         }
         
         try:
-            self.driver.get(profile["profile_url"])
-            self._random_delay(2, 4)
+            self.driver.get(clean_url)
+            self._random_delay(1.5, 3)
             
             # Wait for page to load
             try:
@@ -1147,29 +1506,41 @@ class DeepAnalyzer:
             page_source = self.driver.page_source.lower()
             
             # ========== NAME EXTRACTION ==========
-            name_selectors = [
-                "h1",
-                "[class*='contributor-name']",
-                "[class*='profile-name']",
-                "[class*='artist-name']",
-                "[class*='AuthorName']",
-                "[class*='author-name']",
-            ]
-            for selector in name_selectors:
-                try:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    for el in elements:
-                        text = el.text.strip()
-                        # Filter out generic headers
-                        if (text and len(text) > 1 and len(text) < 100 
-                            and "Adobe" not in text and "Stock" not in text
-                            and "Portfolio" not in text and "assets" not in text.lower()):
-                            profile["name"] = text
+            # First check if we already have a name from the asset detail page
+            if not profile["name"]:
+                name_selectors = [
+                    "h1",
+                    "[class*='contributor-name']",
+                    "[class*='profile-name']",
+                    "[class*='artist-name']",
+                    "[class*='AuthorName']",
+                    "[class*='author-name']",
+                    "[class*='Name'] h1",
+                    "[class*='Name'] span",
+                ]
+                for selector in name_selectors:
+                    try:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                        for el in elements:
+                            text = el.text.strip()
+                            # Filter out generic headers and noise
+                            if (text and len(text) > 1 and len(text) < 100 
+                                and "Adobe" not in text and "Stock" not in text
+                                and "Portfolio" not in text and "assets" not in text.lower()
+                                and "Page not found" not in text and "404" not in text):
+                                profile["name"] = text
+                                break
+                        if profile["name"]:
                             break
-                    if profile["name"]:
-                        break
-                except:
-                    continue
+                    except:
+                        continue
+            
+            # Check if we got a 404 page
+            if "page not found" in page_text.lower() or "404" in page_text:
+                logger.warning(f"Contributor page 404 for {contributor_id}")
+                profile["error"] = "Page not found"
+                # Keep the name from asset detail if we have it
+                return profile
             
             # ========== TOTAL ASSETS COUNT ==========
             # Look for various patterns
@@ -1821,16 +2192,30 @@ class DeepAnalyzer:
                 ]
         
         # ========== CONTRIBUTOR CHART ==========
-        # Use contributor profiles for detailed chart
+        # Use contributor profiles for detailed chart (include all with names)
         for p in contributor_profiles[:10]:
-            if not p.get("error"):
+            # Include profile if it has a name (even with errors - name from asset detail is valid)
+            name = p.get("name")
+            if name:
                 viz["contributor_chart"].append({
-                    "name": p.get("name") or f"Contributor {p.get('adobe_id', 'Unknown')[:8]}",
+                    "name": name,
                     "adobe_id": p.get("adobe_id"),
                     "portfolio_size": p.get("total_assets", 0),
                     "premium_ratio": round(p.get("premium_ratio", 0), 3),
                     "competition_level": p.get("competition_level", "unknown"),
                     "niches": p.get("niches", []),
+                    "profile_url": p.get("profile_url"),
+                })
+            elif not p.get("error"):
+                # Profile without name and no error - use ID as fallback
+                viz["contributor_chart"].append({
+                    "name": f"Contributor {str(p.get('adobe_id', 'Unknown'))[:8]}",
+                    "adobe_id": p.get("adobe_id"),
+                    "portfolio_size": p.get("total_assets", 0),
+                    "premium_ratio": round(p.get("premium_ratio", 0), 3),
+                    "competition_level": p.get("competition_level", "unknown"),
+                    "niches": p.get("niches", []),
+                    "profile_url": p.get("profile_url"),
                 })
         
         # If no profiles, use contributor analysis from market data
@@ -1849,15 +2234,25 @@ class DeepAnalyzer:
         
         # ========== KEYWORD CLOUD ==========
         keyword_freq = market.get("keyword_frequency", {})
-        for kw, count in list(keyword_freq.items())[:30]:
+        if not keyword_freq:
+            # Build from asset keywords
+            for asset in assets:
+                for kw in asset.get("keywords", []):
+                    if kw and len(kw) > 2:
+                        keyword_freq[kw] = keyword_freq.get(kw, 0) + 1
+        
+        for kw, count in sorted(keyword_freq.items(), key=lambda x: x[1], reverse=True)[:30]:
             viz["keyword_cloud"].append({"text": kw, "value": count})
         
         # ========== FRESHNESS TIMELINE ==========
         # Group assets by month for timeline
         monthly_uploads = {}
+        dates_found = 0
+        
         for asset in assets:
             date_str = asset.get("upload_date")
             if date_str:
+                dates_found += 1
                 # Try to parse and group by month
                 try:
                     # Handle various date formats
@@ -1873,7 +2268,18 @@ class DeepAnalyzer:
                 except:
                     continue
         
-        # Convert to list for chart
+        # NOTE: Adobe Stock does NOT publicly display upload dates.
+        # We only show real data if dates were found (unlikely).
+        # No synthetic/mock data is generated - we show "not available" instead.
+        
+        # Add metadata about date availability
+        viz["upload_dates_available"] = dates_found > 0
+        viz["upload_dates_message"] = (
+            f"Found {dates_found} upload dates" if dates_found > 0 
+            else "Upload dates are not publicly available on Adobe Stock"
+        )
+        
+        # Convert to list for chart (only if we have real data)
         sorted_months = sorted(monthly_uploads.items())
         for month, count in sorted_months[-12:]:  # Last 12 months
             viz["freshness_timeline"].append({
@@ -1881,8 +2287,20 @@ class DeepAnalyzer:
                 "uploads": count,
             })
         
+        # Ensure format_distribution has data
+        if not viz["format_distribution"]:
+            format_counts = {}
+            for asset in assets:
+                fmt = asset.get("file_format") or asset.get("asset_type", "Unknown")
+                if fmt:
+                    format_counts[fmt] = format_counts.get(fmt, 0) + 1
+            for fmt, count in format_counts.items():
+                if fmt and fmt != "Unknown":
+                    viz["format_distribution"].append({"name": fmt, "value": count})
+        
         logger.info(f"Visualization data: {len(viz['contributor_chart'])} contributors, "
-                   f"{len(viz['keyword_cloud'])} keywords, {len(viz['price_distribution'])} price buckets")
+                   f"{len(viz['keyword_cloud'])} keywords, {len(viz['price_distribution'])} price buckets, "
+                   f"{dates_found} dates found")
         
         return viz
     

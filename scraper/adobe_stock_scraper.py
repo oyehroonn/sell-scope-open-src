@@ -59,12 +59,17 @@ def get_user_agent():
 
 
 def find_chromedriver():
-    """Find chromedriver path, handling Apple Silicon Macs properly"""
+    """Find chromedriver path, handling Apple Silicon Macs properly.
     
+    Uses webdriver-manager to automatically download the correct version
+    that matches the installed Chrome browser.
+    """
+    
+    # First, try webdriver-manager to get the matching version
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         
-        logger.info("Downloading matching ChromeDriver via webdriver-manager...")
+        logger.info("Getting matching ChromeDriver via webdriver-manager...")
         driver_path = ChromeDriverManager().install()
         logger.info(f"webdriver-manager returned: {driver_path}")
         
@@ -88,25 +93,34 @@ def find_chromedriver():
                     os.chmod(driver_path, 0o755)
                 logger.info(f"Using chromedriver: {driver_path}")
                 return driver_path
-        
-        raise RuntimeError(f"Could not find chromedriver executable in {dir_path}")
                     
     except Exception as e:
-        logger.warning(f"webdriver-manager failed: {e}")
-        
-        homebrew_paths = [
-            "/opt/homebrew/bin/chromedriver",
-            "/usr/local/bin/chromedriver",
-        ]
-        for path in homebrew_paths:
-            if os.path.exists(path):
-                logger.info(f"Found chromedriver at: {path}")
-                return path
-        
-        chromedriver_in_path = shutil.which("chromedriver")
-        if chromedriver_in_path:
-            logger.info(f"Found chromedriver in PATH: {chromedriver_in_path}")
-            return chromedriver_in_path
+        logger.warning(f"webdriver-manager failed: {e}, trying system paths...")
+    
+    # Fallback to system-installed chromedriver
+    system_paths = [
+        "/opt/homebrew/bin/chromedriver",  # macOS Apple Silicon (Homebrew)
+        "/usr/local/bin/chromedriver",      # macOS Intel (Homebrew)
+        "/usr/bin/chromedriver",            # Linux system
+        "/snap/bin/chromedriver",           # Linux snap
+    ]
+    
+    for path in system_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            logger.info(f"Found system chromedriver at: {path}")
+            if not os.access(path, os.X_OK):
+                try:
+                    os.chmod(path, 0o755)
+                    logger.info(f"Made chromedriver executable: {path}")
+                except:
+                    pass
+            return path
+    
+    # Try chromedriver in PATH
+    chromedriver_in_path = shutil.which("chromedriver")
+    if chromedriver_in_path:
+        logger.info(f"Found chromedriver in PATH: {chromedriver_in_path}")
+        return chromedriver_in_path
     
     raise RuntimeError(
         "ChromeDriver not found. Please install it:\n"

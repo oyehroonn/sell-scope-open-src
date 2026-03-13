@@ -250,8 +250,9 @@ export function FreshnessChart({
           <p className="text-xs text-gray-500">
             {!hasData ? (
               <>
-                <span className="font-medium text-gray-500">No upload date data available.</span>{" "}
-                Run a deep analysis to collect upload dates from asset details.
+                <span className="font-medium text-amber-600">Upload dates not available.</span>{" "}
+                Adobe Stock does not publicly display upload dates for assets.
+                The freshness score is estimated based on other market signals.
               </>
             ) : stats.recentTrend === "up" ? (
               <>

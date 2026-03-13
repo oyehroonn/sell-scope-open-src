@@ -62,9 +62,25 @@ interface KeywordResult {
   source?: string;
 }
 
+interface DeepAnalysisData {
+  keyword: string;
+  depth: string;
+  search_results: any;
+  assets: any[];
+  asset_details: any[];
+  contributor_profiles: any[];
+  market_analysis: any;
+  scoring: any;
+  visualizations: any;
+  scraped_at?: string;
+  source?: string;
+  errors?: string[];
+}
+
 interface SavedResearch extends KeywordResult {
   saved_at: string;
   is_opportunity: boolean;
+  deep_analysis?: DeepAnalysisData;  // Store the full deep analysis
 }
 
 function Modal({ 
@@ -142,7 +158,22 @@ export default function KeywordsPage() {
     loadSavedResearches();
   }, []);
 
-  const loadSavedResearches = () => {
+  const loadSavedResearches = async () => {
+    try {
+      // First try to load from API (backend persistence)
+      const response = await fetch(`${API_BASE}/keywords/saved-researches`);
+      if (response.ok) {
+        const data = await response.json();
+        setSavedResearches(data);
+        // Also sync to localStorage as backup
+        localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(data));
+        return;
+      }
+    } catch (e) {
+      console.error("Failed to load from API:", e);
+    }
+    
+    // Fallback to localStorage
     try {
       const saved = localStorage.getItem(SAVED_RESEARCHES_KEY);
       if (saved) {
@@ -153,46 +184,107 @@ export default function KeywordsPage() {
     }
   };
 
-  const saveSavedResearches = (researches: SavedResearch[]) => {
+  const saveResearch = async (result: KeywordResult, deepData?: DeepAnalysisData | null) => {
+    const requestData = {
+      ...result,
+      deep_analysis: deepData || undefined,
+      is_opportunity: isMarkedAsOpportunity(result.keyword),
+    };
+    
     try {
-      localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(researches));
-      setSavedResearches(researches);
+      // Save to backend
+      const response = await fetch(`${API_BASE}/keywords/saved-researches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestData),
+      });
+      
+      if (response.ok) {
+        const savedData = await response.json();
+        // Reload all saved researches to stay in sync
+        await loadSavedResearches();
+        return;
+      }
     } catch (e) {
-      console.error("Failed to save researches:", e);
+      console.error("Failed to save to API:", e);
     }
-  };
-
-  const saveResearch = (result: KeywordResult) => {
+    
+    // Fallback to localStorage
     const existing = savedResearches.find(r => r.keyword.toLowerCase() === result.keyword.toLowerCase());
     if (existing) {
       const updated = savedResearches.map(r => 
         r.keyword.toLowerCase() === result.keyword.toLowerCase()
-          ? { ...result, saved_at: new Date().toISOString(), is_opportunity: r.is_opportunity }
+          ? { 
+              ...result, 
+              saved_at: new Date().toISOString(), 
+              is_opportunity: r.is_opportunity,
+              deep_analysis: deepData || r.deep_analysis,
+            }
           : r
       );
-      saveSavedResearches(updated);
+      localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(updated));
+      setSavedResearches(updated);
     } else {
       const newResearch: SavedResearch = {
         ...result,
         saved_at: new Date().toISOString(),
         is_opportunity: false,
+        deep_analysis: deepData || undefined,
       };
-      saveSavedResearches([newResearch, ...savedResearches]);
+      const updated = [newResearch, ...savedResearches];
+      localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(updated));
+      setSavedResearches(updated);
     }
   };
 
-  const removeResearch = (keyword: string) => {
+  const removeResearch = async (keyword: string) => {
+    try {
+      // Delete from backend
+      const response = await fetch(`${API_BASE}/keywords/saved-researches/${encodeURIComponent(keyword)}`, {
+        method: "DELETE",
+      });
+      
+      if (response.ok) {
+        await loadSavedResearches();
+        return;
+      }
+    } catch (e) {
+      console.error("Failed to delete from API:", e);
+    }
+    
+    // Fallback to localStorage
     const updated = savedResearches.filter(r => r.keyword.toLowerCase() !== keyword.toLowerCase());
-    saveSavedResearches(updated);
+    localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(updated));
+    setSavedResearches(updated);
   };
 
-  const toggleOpportunity = (keyword: string) => {
+  const toggleOpportunity = async (keyword: string) => {
+    const current = savedResearches.find(r => r.keyword.toLowerCase() === keyword.toLowerCase());
+    const newValue = !current?.is_opportunity;
+    
+    try {
+      // Update in backend
+      const response = await fetch(
+        `${API_BASE}/keywords/saved-researches/${encodeURIComponent(keyword)}/opportunity?is_opportunity=${newValue}`,
+        { method: "PATCH" }
+      );
+      
+      if (response.ok) {
+        await loadSavedResearches();
+        return;
+      }
+    } catch (e) {
+      console.error("Failed to update opportunity status:", e);
+    }
+    
+    // Fallback to localStorage
     const updated = savedResearches.map(r => 
       r.keyword.toLowerCase() === keyword.toLowerCase()
-        ? { ...r, is_opportunity: !r.is_opportunity }
+        ? { ...r, is_opportunity: newValue }
         : r
     );
-    saveSavedResearches(updated);
+    localStorage.setItem(SAVED_RESEARCHES_KEY, JSON.stringify(updated));
+    setSavedResearches(updated);
     
     const opportunities = updated.filter(r => r.is_opportunity);
     localStorage.setItem(OPPORTUNITY_KEYWORDS_KEY, JSON.stringify(opportunities));
@@ -317,8 +409,21 @@ export default function KeywordsPage() {
 
   const openDetailsModal = useCallback((result: KeywordResult) => {
     setSelectedKeyword(result);
+    
+    // Check if this is a saved research with deep analysis data
+    const savedResearch = savedResearches.find(
+      r => r.keyword.toLowerCase() === result.keyword.toLowerCase()
+    );
+    
+    if (savedResearch?.deep_analysis) {
+      // Use the saved deep analysis data
+      setDeepAnalysisData(savedResearch.deep_analysis);
+    }
+    // If the current deepAnalysisData matches this keyword, keep it
+    // Otherwise it will be null (for simple searches)
+    
     setShowDetailsModal(true);
-  }, []);
+  }, [savedResearches]);
 
   const openBriefModal = useCallback((result: KeywordResult) => {
     setSelectedKeyword(result);
@@ -516,7 +621,7 @@ Generated: ${new Date().toLocaleString()}`;
                       variant={isSaved ? "secondary" : "outline"}
                       size="sm"
                       className="gap-1"
-                      onClick={() => isSaved ? removeResearch(result.keyword) : saveResearch(result)}
+                      onClick={() => isSaved ? removeResearch(result.keyword) : saveResearch(result, deepAnalysisData)}
                       title={isSaved ? "Remove from saved" : "Save research"}
                     >
                       {isSaved ? (
@@ -1079,7 +1184,7 @@ Generated: ${new Date().toLocaleString()}`;
           if (selectedKeyword) {
             isResearchSaved(selectedKeyword.keyword)
               ? removeResearch(selectedKeyword.keyword)
-              : saveResearch(selectedKeyword);
+              : saveResearch(selectedKeyword, deepAnalysisData);
           }
         }}
         onToggleOpportunity={() => {
@@ -1194,7 +1299,7 @@ Generated: ${new Date().toLocaleString()}`;
                 variant={isResearchSaved(selectedKeyword.keyword) ? "secondary" : "outline"}
                 onClick={() => isResearchSaved(selectedKeyword.keyword) 
                   ? removeResearch(selectedKeyword.keyword) 
-                  : saveResearch(selectedKeyword)
+                  : saveResearch(selectedKeyword, deepAnalysisData)
                 }
               >
                 {isResearchSaved(selectedKeyword.keyword) ? (

@@ -43,7 +43,7 @@ class ContributorScraper:
         self._setup_driver()
     
     def _setup_driver(self):
-        """Initialize Selenium WebDriver"""
+        """Initialize Selenium WebDriver with English locale"""
         options = Options()
         
         if self.headless:
@@ -58,15 +58,23 @@ class ContributorScraper:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
         
+        # Force English (US) locale
+        options.add_argument("--lang=en-US")
+        options.add_argument("--accept-language=en-US,en;q=0.9")
+        
         chromedriver_path = find_chromedriver()
         service = Service(chromedriver_path)
         
         self.driver = webdriver.Chrome(service=service, options=options)
         self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                Object.defineProperty(navigator, 'language', {get: () => 'en-US'});
+            """
         })
         self.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
-        logger.info("WebDriver initialized for contributor scraping")
+        logger.info("WebDriver initialized for contributor scraping (English locale)")
     
     def _random_delay(self, min_delay: float = None, max_delay: float = None):
         """Add random delay to avoid detection"""
