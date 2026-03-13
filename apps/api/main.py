@@ -40,7 +40,16 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting SellScope API", version=settings.VERSION)
-    await init_db()
+    if getattr(settings, "USE_PANDAS_STORE", False):
+        from app.store import init_store
+        init_store()
+        logger.info("Pandas store loaded (no Postgres)")
+    elif getattr(settings, "USE_CSV_STORE", False):
+        from app.store import init_store
+        init_store()
+        logger.info("CSV store loaded (no Postgres)")
+    else:
+        await init_db()
     yield
     logger.info("Shutting down SellScope API")
 

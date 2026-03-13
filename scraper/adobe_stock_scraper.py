@@ -313,7 +313,7 @@ class AdobeStockScraper:
             return False
     
     def _parse_search_result_item(self, item, position: int) -> Optional[Dict[str, Any]]:
-        """Parse a single search result item and extract all available data"""
+        """Parse a single search result item and extract all available data from list page"""
         try:
             asset_url = None
             asset_id = None
@@ -346,75 +346,110 @@ class AdobeStockScraper:
                 return None
             
             title = ""
-            img_selectors = ["img", "picture img", "[data-testid='thumbnail'] img"]
-            for selector in img_selectors:
-                try:
-                    imgs = item.find_elements(By.CSS_SELECTOR, selector)
-                    for img in imgs:
-                        alt = img.get_attribute("alt")
-                        if alt:
-                            title = alt
-                            break
-                    if title:
-                        break
-                except:
-                    continue
-            
             thumbnail_url = ""
+            img_selectors = ["img", "picture img", "picture source", "[data-testid='thumbnail'] img", "img[alt]"]
             for selector in img_selectors:
                 try:
                     imgs = item.find_elements(By.CSS_SELECTOR, selector)
                     for img in imgs:
-                        src = (
-                            img.get_attribute("src")
-                            or img.get_attribute("data-src")
-                            or (img.get_attribute("data-srcset") or "").split(",")[0].strip().split(" ")[0]
-                        )
-                        if src and "adobe" in src and "data:image" not in src:
-                            thumbnail_url = src
+                        if not title:
+                            alt = img.get_attribute("alt") or ""
+                            if alt and len(alt) > 3:
+                                title = alt.strip()
+                        if not thumbnail_url:
+                            src = img.get_attribute("src") or ""
+                            if not src or "data:image" in src:
+                                src = img.get_attribute("data-src") or ""
+                            if not src:
+                                srcset = img.get_attribute("srcset") or img.get_attribute("data-srcset") or ""
+                                if srcset:
+                                    parts = srcset.split(",")
+                                    for part in parts:
+                                        url_part = part.strip().split(" ")[0]
+                                        if url_part and "http" in url_part:
+                                            src = url_part
+                                            break
+                            if src and ("ftcdn" in src or "adobe" in src) and "data:image" not in src:
+                                thumbnail_url = src
+                        if title and thumbnail_url:
                             break
-                    if thumbnail_url:
+                    if title and thumbnail_url:
                         break
                 except Exception:
                     continue
             
             contributor_id = None
             contributor_name = ""
+            contributor_url = ""
             try:
-                contributor_links = item.find_elements(By.CSS_SELECTOR, "a[href*='/contributor/']")
-                if contributor_links:
-                    contributor_link = contributor_links[0]
-                    contributor_url = contributor_link.get_attribute("href")
-                    contributor_id = self._extract_contributor_id(contributor_url)
-                    contributor_name = contributor_link.text.strip()
+                contrib_selectors = [
+                    "a[href*='/contributor/']",
+                    "[class*='contributor'] a",
+                    "[class*='author'] a",
+                    "[class*='Artist'] a",
+                    "[data-testid*='contributor']",
+                ]
+                for sel in contrib_selectors:
+                    try:
+                        links = item.find_elements(By.CSS_SELECTOR, sel)
+                        for link in links:
+                            href = link.get_attribute("href") or ""
+                            if "/contributor/" in href:
+                                contributor_url = href
+                                contributor_id = self._extract_contributor_id(href)
+                                contributor_name = (link.text or "").strip()
+                                if not contributor_name:
+                                    contributor_name = link.get_attribute("title") or ""
+                                break
+                        if contributor_id:
+                            break
+                    except:
+                        continue
             except:
                 pass
             
             asset_type = self._determine_asset_type(item, asset_url)
-            
             is_premium = self._is_premium(item)
-            
             license_type = "Premium" if is_premium else "Standard"
+            
+            is_editorial = False
+            is_ai_generated = False
+            try:
+                item_html = item.get_attribute("outerHTML") or ""
+                item_text = item.text or ""
+                if "editorial" in item_html.lower() or "editorial" in item_text.lower():
+                    is_editorial = True
+                if "ai generated" in item_html.lower() or "ai-generated" in item_html.lower() or "generative" in item_text.lower():
+                    is_ai_generated = True
+            except:
+                pass
             
             dimensions = {"width": None, "height": None}
             try:
-                dim_elements = item.find_elements(By.CSS_SELECTOR, "[class*='dimension'], [class*='size']")
-                for elem in dim_elements:
-                    dims = self._extract_dimensions(elem.text)
-                    if dims["width"]:
-                        dimensions = dims
+                dim_selectors = ["[class*='dimension']", "[class*='size']", "[class*='resolution']", "span"]
+                for sel in dim_selectors:
+                    elems = item.find_elements(By.CSS_SELECTOR, sel)
+                    for elem in elems:
+                        dims = self._extract_dimensions(elem.text)
+                        if dims["width"]:
+                            dimensions = dims
+                            break
+                    if dimensions["width"]:
                         break
             except:
                 pass
             
             orientation = None
+            aspect_ratio = None
             if dimensions["width"] and dimensions["height"]:
-                if dimensions["width"] > dimensions["height"]:
+                w, h = dimensions["width"], dimensions["height"]
+                if w > h:
                     orientation = "horizontal"
-                elif dimensions["height"] > dimensions["width"]:
+                elif h > w:
                     orientation = "vertical"
                 else:
                     orientation = "square"
+                aspect_ratio = round(w / h, 2) if h else None
             
             similar_count = None
             try:
@@ -435,12 +470,16 @@ class AdobeStockScraper:
                 "thumbnail_url": thumbnail_url,
                 "contributor_id": contributor_id,
                 "contributor_name": contributor_name,
+                "contributor_url": contributor_url,
                 "asset_type": asset_type,
                 "is_premium": is_premium,
+                "is_editorial": is_editorial,
+                "is_ai_generated": is_ai_generated,
                 "license_type": license_type,
                 "width": dimensions["width"],
                 "height": dimensions["height"],
                 "orientation": orientation,
+                "aspect_ratio": aspect_ratio,
                 "similar_count": similar_count,
                 "source": "search",
                 "scraped_at": datetime.utcnow().isoformat(),
@@ -677,7 +716,7 @@ class AdobeStockScraper:
             raise
     
     def _scrape_asset_details(self, scrape_similar: bool = False, max_similar_per_asset: int = 5):
-        """Scrape individual asset pages: keywords, description, dimensions, preview URL, category, file format, similar asset IDs."""
+        """Scrape individual asset pages: ALL available fields including keywords, dimensions, pricing, colors, releases, etc."""
         with tqdm(total=len(self.results), desc="Fetching details", unit="assets") as pbar:
             for result in self.results:
                 try:
@@ -686,34 +725,114 @@ class AdobeStockScraper:
                         pbar.update(1)
                         continue
                     
-                    detail_url = f"{ASSET_URL}/{asset_id}"
+                    # Use the full URL from search results if available (includes slug and locale)
+                    detail_url = result.get("asset_url") or f"{ASSET_URL}/{asset_id}"
                     self.driver.get(detail_url)
-                    self._random_delay(1.0, 2.0)
+                    self._random_delay(1.5, 2.5)
+                    
+                    # Scroll to trigger lazy loading of keywords section
+                    try:
+                        self.driver.execute_script("window.scrollTo(0, 500);")
+                        time.sleep(0.5)
+                        self.driver.execute_script("window.scrollTo(0, 1000);")
+                        time.sleep(0.5)
+                    except:
+                        pass
+                    
+                    page_html = ""
+                    page_text = ""
+                    try:
+                        page_html = self.driver.page_source or ""
+                        page_text = self.driver.find_element(By.TAG_NAME, "body").text or ""
+                    except:
+                        pass
                     
                     keywords = []
                     keyword_selectors = [
                         "a[href*='k=']",
+                        "a[href*='/search?k=']",
                         "[data-testid='keyword']",
-                        "[class*='keyword']",
-                        "[class*='tag']",
-                        "[class*='Keyword']",
+                        "[data-testid*='keyword']",
+                        "[class*='keyword'] a",
+                        "[class*='Keyword'] a",
+                        "[class*='tag-'] a",
+                        "[class*='Tag'] a",
+                        "section[class*='keyword'] a",
+                        "div[class*='keyword'] a",
+                    ]
+                    # Skip UI text, navigation, and footer content
+                    skip_texts = [
+                        "ver más", "see more", "view more", "show more", "load more", "similar", "más", "more",
+                        "mostrar todo", "show all", "ver todo", "cambiar", "change", "términos", "terms",
+                        "licencia", "license", "privacidad", "privacy", "cookies", "adobe", "copyright",
+                        "mapa del sitio", "sitemap", "empresa", "company", "formación", "training",
+                        "asistencia", "support", "vender", "sell", "adchoices", "enable", "don't",
+                        "all rights", "condiciones", "preferencias", "settings", "make it"
                     ]
                     for selector in keyword_selectors:
                         try:
                             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                             for elem in elements:
-                                text = elem.text.strip()
-                                if text and 1 < len(text) < 80 and text not in keywords:
-                                    keywords.append(text)
+                                text = (elem.text or "").strip()
+                                if text and 1 < len(text) < 50 and text.lower() not in [k.lower() for k in keywords]:
+                                    if not any(skip in text.lower() for skip in skip_texts):
+                                        # Skip if it looks like a copyright notice or contains special chars
+                                        if not re.search(r'[©®™]|\d{4}\s+Adobe|\(\d+\)', text):
+                                            keywords.append(text)
                         except Exception:
                             continue
+                    
+                    # Primary method: extract keywords from page text after "KEYWORDS" or "PALABRAS CLAVE" section
+                    # This is more reliable as keywords are displayed as plain text on the page
+                    if len(keywords) < 5:
+                        try:
+                            # Find the keywords section and extract all words until next section
+                            kw_section_match = re.search(
+                                r'(?:SIMILAR KEYWORDS|PALABRAS CLAVE SIMILARES|KEYWORDS)\s*\n((?:[^\n]+\n?)+?)(?:SIMILAR|MÁS DE|MORE FROM|VIDEOS|VÍDEOS|\n\n|$)',
+                                page_text, re.I
+                            )
+                            if kw_section_match:
+                                kw_text = kw_section_match.group(1)
+                                for line in kw_text.split('\n'):
+                                    kw = line.strip()
+                                    # Skip empty lines, numbers, UI text, and footer content
+                                    if kw and 1 < len(kw) < 50 and not kw.isdigit():
+                                        if kw.lower() not in [k.lower() for k in keywords]:
+                                            if not any(skip in kw.lower() for skip in skip_texts):
+                                                if not re.search(r'[©®™]|\d{4}\s+Adobe|\(\d+\)', kw):
+                                                    keywords.append(kw)
+                        except:
+                            pass
                     
                     result["keywords_list"] = keywords[:100]
                     result["keywords"] = "|".join(keywords[:50])
                     result["keyword_count"] = len(keywords)
                     
+                    if not result.get("title") or len(result.get("title", "")) < 5:
+                        try:
+                            title_selectors = ["h1", "meta[property='og:title']", "meta[name='title']", "[class*='title'] h1"]
+                            for sel in title_selectors:
+                                elems = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                                for elem in elems:
+                                    if elem.tag_name.lower() == "meta":
+                                        t = elem.get_attribute("content") or ""
+                                    else:
+                                        t = (elem.text or "").strip()
+                                    if t and len(t) > 5:
+                                        result["title"] = t[:500]
+                                        break
+                                if result.get("title"):
+                                    break
+                        except:
+                            pass
+                    
                     try:
-                        desc_selectors = ["[class*='description']", "[data-testid='description']", "meta[name='description']"]
+                        desc_selectors = [
+                            "meta[name='description']",
+                            "meta[property='og:description']",
+                            "[class*='description']",
+                            "[data-testid='description']",
+                        ]
                         for selector in desc_selectors:
                             try:
                                 elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
@@ -721,7 +840,7 @@ class AdobeStockScraper:
                                     if elem.tag_name.lower() == "meta":
                                         desc = elem.get_attribute("content") or ""
                                     else:
-                                        desc = elem.text.strip() or ""
+                                        desc = (elem.text or "").strip()
                                     if desc and len(desc) > 10:
                                         result["description"] = desc[:2000]
                                         break
@@ -734,63 +853,242 @@ class AdobeStockScraper:
                     
                     try:
                         category_selectors = [
-                            "[data-testid='category']",
                             "a[href*='/category/']",
-                            "[class*='category']",
-                            "[class*='Category']",
+                            "[data-testid='category']",
+                            "[class*='category'] a",
+                            "[class*='Category'] a",
+                            "nav a[href*='category']",
                         ]
+                        categories = []
                         for selector in category_selectors:
                             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                             for elem in elements:
-                                cat_text = elem.text.strip()
-                                if cat_text and len(cat_text) < 200:
-                                    result["category"] = cat_text
-                                    break
-                            if result.get("category"):
-                                break
+                                cat_text = (elem.text or "").strip()
+                                if cat_text and 2 < len(cat_text) < 100 and cat_text not in categories:
+                                    categories.append(cat_text)
+                        if categories:
+                            result["category"] = categories[0]
+                            result["categories"] = categories[:5]
                     except Exception:
                         pass
                     
                     try:
-                        dim_selectors = ["[class*='dimension']", "[class*='size']", "[data-testid='dimensions']"]
+                        dim_selectors = [
+                            "[class*='dimension']",
+                            "[class*='Dimension']",
+                            "[class*='size']",
+                            "[class*='Size']",
+                            "[class*='resolution']",
+                            "[data-testid='dimensions']",
+                            "[data-testid='size']",
+                        ]
                         for selector in dim_selectors:
                             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                             for elem in elements:
-                                dims = self._extract_dimensions(elem.text)
+                                text = elem.text or ""
+                                dims = self._extract_dimensions(text)
                                 if dims["width"]:
                                     result["width"] = dims["width"]
                                     result["height"] = dims["height"]
-                                    result["orientation"] = (
-                                        "horizontal" if dims["width"] > dims["height"] else
-                                        "vertical" if dims["height"] > dims["width"] else "square"
-                                    )
+                                    w, h = dims["width"], dims["height"]
+                                    result["orientation"] = "horizontal" if w > h else "vertical" if h > w else "square"
+                                    result["aspect_ratio"] = round(w / h, 2) if h else None
+                                    result["megapixels"] = round((w * h) / 1000000, 2)
                                     break
                             if result.get("width"):
                                 break
+                        if not result.get("width"):
+                            dim_match = re.search(r'(\d{3,5})\s*[x×X]\s*(\d{3,5})', page_text)
+                            if dim_match:
+                                w, h = int(dim_match.group(1)), int(dim_match.group(2))
+                                result["width"] = w
+                                result["height"] = h
+                                result["orientation"] = "horizontal" if w > h else "vertical" if h > w else "square"
+                                result["aspect_ratio"] = round(w / h, 2) if h else None
+                                result["megapixels"] = round((w * h) / 1000000, 2)
                     except Exception:
                         pass
                     
                     try:
-                        main_img = self.driver.find_elements(By.CSS_SELECTOR, "img[src*='adobe'], img[data-src*='adobe'], picture img")
-                        for img in main_img:
-                            src = img.get_attribute("src") or img.get_attribute("data-src")
-                            if src and "adobe" in src and "thumb" not in src.lower() and "small" not in src.lower():
-                                result["preview_url"] = src
+                        img_selectors = [
+                            "img[src*='ftcdn']",
+                            "img[src*='adobe']",
+                            "picture img",
+                            "[class*='preview'] img",
+                            "[class*='Preview'] img",
+                            "[data-testid='asset-image'] img",
+                        ]
+                        for sel in img_selectors:
+                            imgs = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                            for img in imgs:
+                                src = img.get_attribute("src") or img.get_attribute("data-src") or ""
+                                if src and ("ftcdn" in src or "adobe" in src) and "data:image" not in src:
+                                    if "thumb" not in src.lower() and "_s." not in src.lower():
+                                        result["preview_url"] = src
+                                        break
+                                    elif not result.get("thumbnail_url"):
+                                        result["thumbnail_url"] = src
+                            if result.get("preview_url"):
                                 break
                     except Exception:
                         pass
                     
                     try:
-                        format_selectors = ["[class*='file-type']", "[class*='format']", "[data-testid='file-type']"]
+                        format_selectors = [
+                            "[class*='file-type']",
+                            "[class*='FileType']",
+                            "[class*='format']",
+                            "[class*='Format']",
+                            "[data-testid='file-type']",
+                        ]
                         for selector in format_selectors:
                             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                             for elem in elements:
-                                fmt = elem.text.strip().upper()
-                                if fmt and len(fmt) < 20 and any(x in fmt for x in ("JPEG", "PNG", "EPS", "AI", "VIDEO", "MP4", "VECTOR")):
-                                    result["file_format"] = fmt
-                                    break
+                                fmt = (elem.text or "").strip().upper()
+                                if fmt and len(fmt) < 30:
+                                    if any(x in fmt for x in ("JPEG", "JPG", "PNG", "EPS", "AI", "SVG", "VIDEO", "MP4", "MOV", "VECTOR", "PSD", "TIFF")):
+                                        result["file_format"] = fmt
+                                        break
                             if result.get("file_format"):
                                 break
+                        if not result.get("file_format"):
+                            fmt_match = re.search(r'\b(JPEG|JPG|PNG|EPS|AI|SVG|MP4|MOV|PSD|TIFF|VECTOR)\b', page_text, re.I)
+                            if fmt_match:
+                                result["file_format"] = fmt_match.group(1).upper()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        price_selectors = [
+                            "[class*='price']",
+                            "[class*='Price']",
+                            "[class*='credit']",
+                            "[class*='Credit']",
+                            "[data-testid='price']",
+                        ]
+                        for selector in price_selectors:
+                            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            for elem in elements:
+                                price_text = (elem.text or "").strip()
+                                if price_text:
+                                    price_match = re.search(r'[\$€£]?\s*(\d+(?:[.,]\d{2})?)', price_text)
+                                    if price_match:
+                                        result["price"] = price_match.group(0).strip()
+                                    credit_match = re.search(r'(\d+)\s*credit', price_text, re.I)
+                                    if credit_match:
+                                        result["credits"] = int(credit_match.group(1))
+                                    break
+                            if result.get("price") or result.get("credits"):
+                                break
+                    except Exception:
+                        pass
+                    
+                    try:
+                        if "editorial" in page_html.lower() or "editorial" in page_text.lower():
+                            result["is_editorial"] = True
+                        if "ai generated" in page_html.lower() or "ai-generated" in page_html.lower() or "generative ai" in page_text.lower():
+                            result["is_ai_generated"] = True
+                        if "model release" in page_text.lower():
+                            result["has_model_release"] = "model release" in page_text.lower() and "no model release" not in page_text.lower()
+                        if "property release" in page_text.lower():
+                            result["has_property_release"] = "property release" in page_text.lower() and "no property release" not in page_text.lower()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        color_selectors = [
+                            "[class*='color']",
+                            "[class*='Color']",
+                            "[data-testid*='color']",
+                            "[style*='background-color']",
+                        ]
+                        colors = []
+                        for selector in color_selectors:
+                            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            for elem in elements:
+                                bg = elem.value_of_css_property("background-color") or ""
+                                if bg and bg != "rgba(0, 0, 0, 0)" and bg != "transparent":
+                                    colors.append(bg)
+                                color_text = (elem.text or "").strip()
+                                if color_text and len(color_text) < 30:
+                                    colors.append(color_text)
+                            if len(colors) >= 5:
+                                break
+                        if colors:
+                            result["color_palette"] = colors[:10]
+                    except Exception:
+                        pass
+                    
+                    try:
+                        date_match = re.search(r'(?:uploaded|added|created)[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+\s+\d{1,2},?\s+\d{4})', page_text, re.I)
+                        if date_match:
+                            result["upload_date"] = date_match.group(1)
+                    except Exception:
+                        pass
+                    
+                    try:
+                        if not result.get("contributor_id") or not result.get("contributor_name"):
+                            contrib_selectors = [
+                                "a[href*='/contributor/']",
+                                "[class*='contributor'] a",
+                                "[class*='Contributor'] a",
+                                "[class*='author'] a",
+                                "[class*='Author'] a",
+                                "[class*='artist'] a",
+                                "[class*='Artist'] a",
+                            ]
+                            for sel in contrib_selectors:
+                                links = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                                for link in links:
+                                    href = link.get_attribute("href") or ""
+                                    if "/contributor/" in href:
+                                        result["contributor_url"] = href
+                                        result["contributor_id"] = self._extract_contributor_id(href)
+                                        name = (link.text or "").strip()
+                                        if not name:
+                                            name = link.get_attribute("title") or ""
+                                        # Try parent element text if link text is empty
+                                        if not name:
+                                            try:
+                                                parent = link.find_element(By.XPATH, "..")
+                                                name = (parent.text or "").strip()
+                                            except:
+                                                pass
+                                        result["contributor_name"] = name
+                                        break
+                                if result.get("contributor_id"):
+                                    break
+                            
+                            # Fallback: extract contributor from page text (e.g., "by panitan" or "de panitan")
+                            if not result.get("contributor_name"):
+                                contrib_match = re.search(r'(?:by|de|from|por)\s+([A-Za-z0-9_-]+)', page_text, re.I)
+                                if contrib_match:
+                                    result["contributor_name"] = contrib_match.group(1)
+                    except Exception:
+                        pass
+                    
+                    try:
+                        video_duration = None
+                        if result.get("asset_type") == "video":
+                            dur_match = re.search(r'(\d{1,2}):(\d{2})(?::(\d{2}))?', page_text)
+                            if dur_match:
+                                mins = int(dur_match.group(1))
+                                secs = int(dur_match.group(2))
+                                video_duration = mins * 60 + secs
+                                result["video_duration_seconds"] = video_duration
+                            fps_match = re.search(r'(\d+(?:\.\d+)?)\s*fps', page_text, re.I)
+                            if fps_match:
+                                result["video_fps"] = float(fps_match.group(1))
+                    except Exception:
+                        pass
+                    
+                    try:
+                        dpi_match = re.search(r'(\d+)\s*(?:dpi|ppi)', page_text, re.I)
+                        if dpi_match:
+                            result["dpi"] = int(dpi_match.group(1))
+                        size_match = re.search(r'(\d+(?:\.\d+)?)\s*(MB|KB|GB)', page_text, re.I)
+                        if size_match:
+                            result["file_size"] = f"{size_match.group(1)} {size_match.group(2).upper()}"
                     except Exception:
                         pass
                     
@@ -930,11 +1228,19 @@ class AdobeStockScraper:
         df = pd.DataFrame(self.results)
         
         columns_order = [
-            "position", "asset_id", "title", "description", "asset_type", "contributor_id",
-            "contributor_name", "is_premium", "license_type", "width", "height",
-            "orientation", "keywords", "keyword_count", "category", "similar_count",
-            "file_format", "asset_url", "thumbnail_url", "preview_url", "search_query",
-            "search_page", "source", "scraped_at"
+            "position", "asset_id", "title", "description", "asset_type",
+            "contributor_id", "contributor_name", "contributor_url",
+            "is_premium", "is_editorial", "is_ai_generated", "license_type",
+            "width", "height", "orientation", "aspect_ratio", "megapixels",
+            "keywords", "keywords_list", "keyword_count", "category", "categories",
+            "similar_count", "similar_asset_ids",
+            "file_format", "file_size", "dpi",
+            "price", "credits",
+            "has_model_release", "has_property_release",
+            "color_palette", "upload_date",
+            "video_duration_seconds", "video_fps",
+            "asset_url", "thumbnail_url", "preview_url",
+            "search_query", "search_page", "source", "scraped_at"
         ]
         
         existing_columns = [col for col in columns_order if col in df.columns]

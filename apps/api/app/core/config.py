@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://sellscope:sellscope@localhost:5432/sellscope"
     
+    # File-based store (no Postgres/Redis when True). One of CSV or Pandas.
+    USE_CSV_STORE: bool = False
+    USE_PANDAS_STORE: bool = True  # Main DB as nested pandas; stores full scraped_data per asset
+    DATA_DIR: str = "data"
+    
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
     

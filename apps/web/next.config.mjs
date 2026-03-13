@@ -12,6 +12,22 @@ const nextConfig = {
         protocol: "https",
         hostname: "*.ftcdn.net",
       },
+      {
+        protocol: "https",
+        hostname: "t3.ftcdn.net",
+      },
+      {
+        protocol: "https",
+        hostname: "t4.ftcdn.net",
+      },
+      {
+        protocol: "https",
+        hostname: "as1.ftcdn.net",
+      },
+      {
+        protocol: "https",
+        hostname: "as2.ftcdn.net",
+      },
     ],
   },
   async rewrites() {

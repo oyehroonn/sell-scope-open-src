@@ -1,0 +1,3 @@
+adobe_id,title,description,keywords,contributor_id,contributor_name,asset_type,category,category_name,width,height,orientation,thumbnail_url,preview_url,asset_url,file_format,creation_date,is_premium,is_editorial,is_ai_generated,estimated_downloads,similar_count,color_palette,style_tags,source,scraped_at,created_at,updated_at
+123,Apple,,,,,photo,,,,,,,,,,,false,false,false,,,,,,,2026-03-13T00:00:48.998127,2026-03-13T00:00:48.998127
+456,Banana,,"[""fruit"", ""banana""]",c2,Bob,photo,Food,,,,,,,,,,false,,,,,,,search,,2026-03-13T00:01:32.706381,2026-03-13T00:01:32.706381

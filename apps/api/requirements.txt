@@ -35,6 +35,9 @@ numpy==1.26.4
 scikit-learn==1.4.2
 hdbscan==0.8.33
 
+# Pandas store (file-based DB with full scraped_data)
+pandas>=2.0.0
+
 # Utilities
 tenacity==8.2.3
 structlog==24.1.0

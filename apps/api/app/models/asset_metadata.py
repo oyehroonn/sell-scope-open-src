@@ -14,4 +14,4 @@ class AssetMetadata(Base):
     key: Mapped[str] = mapped_column(String(255), index=True)
     value: Mapped[str] = mapped_column(Text, nullable=True)
 
-    asset = relationship("Asset", back_populates="metadata")
+    asset = relationship("Asset", back_populates="asset_metadata")

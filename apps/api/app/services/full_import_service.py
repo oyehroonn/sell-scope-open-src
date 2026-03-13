@@ -244,3 +244,161 @@ async def full_import(
             counts["errors"].append(f"similar {item.get('asset_id')}: {str(e)}")
 
     return counts
+
+
+def full_import_csv(store, query: str, results: List[Dict[str, Any]], similar_results: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Full import using CSV store (no DB). Same logic as full_import; returns counts dict with errors list.
+    """
+    similar_results = similar_results or []
+    counts = {
+        "searches": 0,
+        "contributors": 0,
+        "assets": 0,
+        "search_results": 0,
+        "keywords": 0,
+        "asset_keywords": 0,
+        "similar_assets": 0,
+        "categories": 0,
+        "asset_categories": 0,
+        "errors": [],
+    }
+    term = (query or "").strip().lower()
+    if not term:
+        counts["errors"].append("query is required")
+        return counts
+
+    store.upsert_search(term, total_results_available=len(results), scraped_at=datetime.utcnow())
+    counts["searches"] = 1
+
+    for item in results:
+        try:
+            adobe_id = str(item.get("asset_id", ""))
+            if not adobe_id:
+                continue
+
+            contrib_adobe = item.get("contributor_id")
+            if contrib_adobe:
+                store.upsert_contributor(contrib_adobe, name=item.get("contributor_name"))
+
+            data = _asset_from_item_sync(item)
+            if not store.get_asset(adobe_id):
+                counts["assets"] += 1
+            store.upsert_asset(data, scraped_data=item)
+
+            store.add_search_result(term, adobe_id, position=item.get("position", 0), page=item.get("search_page", 1))
+            counts["search_results"] += 1
+
+            keywords_list = item.get("keywords_list") or (item.get("keywords") and [k.strip() for k in str(item["keywords"]).split("|") if k.strip()]) or []
+            for kw_term in keywords_list[:100]:
+                if store.upsert_keyword(kw_term, "asset"):
+                    store.add_asset_keyword(adobe_id, kw_term, "meta")
+                    counts["asset_keywords"] += 1
+
+            cat_name = item.get("category")
+            if cat_name:
+                store.upsert_category(cat_name)
+                store.add_asset_category(adobe_id, cat_name)
+                counts["asset_categories"] += 1
+
+        except Exception as e:
+            counts["errors"].append(f"asset {item.get('asset_id')}: {str(e)}")
+
+    for item in similar_results:
+        try:
+            adobe_id = str(item.get("asset_id", ""))
+            similar_to_adobe = str(item.get("similar_to_asset_id", ""))
+            if not adobe_id or not similar_to_adobe:
+                continue
+
+            if item.get("contributor_id"):
+                store.upsert_contributor(item["contributor_id"], name=item.get("contributor_name"))
+
+            data = _asset_from_item_sync(item)
+            if not store.get_asset(adobe_id):
+                counts["assets"] += 1
+            store.upsert_asset(data, scraped_data=item)
+
+            store.add_similar(similar_to_adobe, adobe_id, rank=item.get("rank", 0))
+            counts["similar_assets"] += 1
+
+            keywords_list = item.get("keywords_list") or (item.get("keywords") and [k.strip() for k in str(item["keywords"]).split("|") if k.strip()]) or []
+            for kw_term in keywords_list[:50]:
+                if store.upsert_keyword(kw_term, "asset"):
+                    store.add_asset_keyword(adobe_id, kw_term, "meta")
+                    counts["asset_keywords"] += 1
+
+            if item.get("category"):
+                store.upsert_category(item["category"])
+                store.add_asset_category(adobe_id, item["category"])
+                counts["asset_categories"] += 1
+
+        except Exception as e:
+            counts["errors"].append(f"similar {item.get('asset_id')}: {str(e)}")
+
+    return counts
+
+
+def _asset_from_item_sync(item: Dict[str, Any]) -> Dict:
+    """Sync version of asset dict from scraper item (no async). Maps ALL scraped fields."""
+    keywords_list = item.get("keywords_list")
+    if not keywords_list and item.get("keywords"):
+        keywords_list = [k.strip() for k in str(item["keywords"]).split("|") if k.strip()]
+    
+    return {
+        # Core identifiers
+        "adobe_id": str(item.get("asset_id", "")),
+        "title": item.get("title"),
+        "description": item.get("description"),
+        "asset_type": item.get("asset_type", "photo"),
+        "source": item.get("source", "search"),
+        # Contributor
+        "contributor_id": item.get("contributor_id"),
+        "contributor_name": item.get("contributor_name"),
+        "contributor_url": item.get("contributor_url"),
+        # Licensing
+        "is_premium": item.get("is_premium", False),
+        "is_editorial": item.get("is_editorial", False),
+        "is_ai_generated": item.get("is_ai_generated", False),
+        "license_type": item.get("license_type"),
+        "has_model_release": item.get("has_model_release"),
+        "has_property_release": item.get("has_property_release"),
+        # Dimensions
+        "width": item.get("width"),
+        "height": item.get("height"),
+        "orientation": item.get("orientation"),
+        "aspect_ratio": item.get("aspect_ratio"),
+        "megapixels": item.get("megapixels"),
+        # Keywords and categories
+        "keywords": keywords_list[:100] if keywords_list else None,
+        "keywords_list": keywords_list[:100] if keywords_list else None,
+        "keyword_count": item.get("keyword_count"),
+        "category": item.get("category"),
+        "categories": item.get("categories"),
+        # Similar assets
+        "similar_count": item.get("similar_count"),
+        "similar_asset_ids": item.get("similar_asset_ids"),
+        # File info
+        "file_format": item.get("file_format"),
+        "file_size": item.get("file_size"),
+        "dpi": item.get("dpi"),
+        # Pricing
+        "price": item.get("price"),
+        "credits": item.get("credits"),
+        # Colors and dates
+        "color_palette": item.get("color_palette"),
+        "upload_date": item.get("upload_date"),
+        # Video-specific
+        "video_duration_seconds": item.get("video_duration_seconds"),
+        "video_fps": item.get("video_fps"),
+        # URLs
+        "asset_url": item.get("asset_url"),
+        "thumbnail_url": item.get("thumbnail_url"),
+        "preview_url": item.get("preview_url") or item.get("asset_url"),
+        # Search context
+        "search_query": item.get("search_query"),
+        # Timestamps
+        "scraped_at": item.get("scraped_at"),
+        "search_page": item.get("search_page"),
+        "position": item.get("position"),
+    }

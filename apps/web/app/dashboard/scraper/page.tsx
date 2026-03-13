@@ -1,299 +1,523 @@
 "use client";
 
-import { useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
+import { HolographicLoader } from "@/components/ui/holographic-loader";
+import { AssetCard, AssetCardSkeleton, AssetData } from "@/components/ui/asset-card";
 import {
-  AlertCircle,
-  CheckCircle,
-  Clock,
-  Download,
-  Loader2,
-  Play,
   Search,
-  Terminal,
+  Sparkles,
+  SlidersHorizontal,
+  X,
+  ImageIcon,
+  Video,
+  Layers,
+  TrendingUp,
+  Clock,
+  Zap,
+  Database,
 } from "lucide-react";
 
-interface ScrapeJob {
-  id: string;
-  query: string;
-  status: "pending" | "running" | "completed" | "failed";
-  resultsCount: number;
-  startedAt: string;
-  completedAt?: string;
-  error?: string;
-}
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export default function ScraperPage() {
+// Track which assets have been added to library in this session
+const addedToLibrary = new Set<string>();
+
+const SUGGESTED_SEARCHES = [
+  "nature landscape",
+  "business meeting",
+  "technology abstract",
+  "food photography",
+  "minimalist design",
+  "urban architecture",
+];
+
+// Session cache for search results
+const searchCache = new Map<string, { assets: AssetData[]; timestamp: number }>();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
+export default function SearchPage() {
   const [query, setQuery] = useState("");
-  const [maxResults, setMaxResults] = useState(500);
-  const [scrapeDetails, setScrapeDetails] = useState(true);
-  const [isRunning, setIsRunning] = useState(false);
-  const [jobs, setJobs] = useState<ScrapeJob[]>([]);
+  const [maxResults, setMaxResults] = useState(20);
+  const [isSearching, setIsSearching] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState("Initializing search...");
+  const [results, setResults] = useState<AssetData[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  const [fromCache, setFromCache] = useState(false);
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const handleStartScrape = async () => {
-    if (!query.trim()) return;
+  useEffect(() => {
+    const saved = localStorage.getItem("recentSearches");
+    if (saved) {
+      setRecentSearches(JSON.parse(saved));
+    }
+  }, []);
 
-    const newJob: ScrapeJob = {
-      id: Date.now().toString(),
-      query: query.trim(),
-      status: "pending",
-      resultsCount: 0,
-      startedAt: new Date().toISOString(),
-    };
-
-    setJobs((prev) => [newJob, ...prev]);
-    setIsRunning(true);
-
-    setTimeout(() => {
-      setJobs((prev) =>
-        prev.map((job) =>
-          job.id === newJob.id ? { ...job, status: "running" } : job
-        )
-      );
-    }, 500);
-
-    setTimeout(() => {
-      setJobs((prev) =>
-        prev.map((job) =>
-          job.id === newJob.id
-            ? {
-                ...job,
-                status: "completed",
-                resultsCount: Math.floor(Math.random() * maxResults) + 100,
-                completedAt: new Date().toISOString(),
-              }
-            : job
-        )
-      );
-      setIsRunning(false);
-    }, 3000);
+  const saveRecentSearch = (search: string) => {
+    const updated = [search, ...recentSearches.filter(s => s !== search)].slice(0, 5);
+    setRecentSearches(updated);
+    localStorage.setItem("recentSearches", JSON.stringify(updated));
   };
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case "pending":
-        return (
-          <Badge variant="secondary" className="gap-1">
-            <Clock className="h-3 w-3" />
-            Pending
-          </Badge>
+  const getCacheKey = (q: string, max: number) => `${q.toLowerCase().trim()}_${max}`;
+
+  const checkCache = (q: string, max: number): AssetData[] | null => {
+    const key = getCacheKey(q, max);
+    const cached = searchCache.get(key);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      return cached.assets;
+    }
+    searchCache.delete(key);
+    return null;
+  };
+
+  const setCache = (q: string, max: number, assets: AssetData[]) => {
+    const key = getCacheKey(q, max);
+    searchCache.set(key, { assets, timestamp: Date.now() });
+  };
+
+  const simulateProgress = useCallback(() => {
+    const messages = [
+      "Connecting to Adobe Stock...",
+      "Scanning search results...",
+      "Extracting asset data...",
+      "Fetching keywords and metadata...",
+      "Processing images...",
+      "Analyzing content...",
+      "Finalizing results...",
+    ];
+    
+    let currentProgress = 0;
+    progressIntervalRef.current = setInterval(() => {
+      currentProgress += Math.random() * 12;
+      if (currentProgress > 95) currentProgress = 95;
+      setProgress(currentProgress);
+      
+      const messageIndex = Math.min(
+        Math.floor((currentProgress / 100) * messages.length),
+        messages.length - 1
+      );
+      setLoadingMessage(messages[messageIndex]);
+    }, 600);
+    
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+    };
+  }, []);
+
+  const handleSearch = async () => {
+    if (!query.trim()) return;
+    
+    const searchQuery = query.trim();
+    saveRecentSearch(searchQuery);
+    
+    // Check cache first
+    const cachedResults = checkCache(searchQuery, maxResults);
+    if (cachedResults && cachedResults.length > 0) {
+      setFromCache(true);
+      setResults(cachedResults);
+      setHasSearched(true);
+      return;
+    }
+    
+    setFromCache(false);
+    setIsSearching(true);
+    setHasSearched(true);
+    setProgress(0);
+    setResults([]);
+    
+    const stopProgress = simulateProgress();
+    
+    try {
+      const response = await fetch(`${API_BASE}/scraper/live-scrape`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: searchQuery,
+          max_results: maxResults,
+          scrape_details: true,
+        }),
+      });
+      
+      if (!response.ok) throw new Error("Search failed");
+      
+      const data = await response.json();
+      setProgress(100);
+      setLoadingMessage("Complete!");
+      
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      let mappedAssets: AssetData[] = [];
+      
+      if (data.assets && data.assets.length > 0) {
+        mappedAssets = data.assets.map((a: any) => ({
+          adobe_id: a.adobe_id,
+          title: a.title,
+          thumbnail_url: a.thumbnail_url,
+          preview_url: a.preview_url,
+          asset_type: a.asset_type || "photo",
+          contributor_name: a.contributor_name,
+          contributor_id: a.contributor_id,
+          is_premium: a.is_premium,
+          is_ai_generated: a.is_ai_generated,
+          is_editorial: a.is_editorial,
+          width: a.width,
+          height: a.height,
+          orientation: a.orientation,
+          keyword_count: a.keyword_count || 0,
+        }));
+      } else {
+        // Fallback: fetch from assets endpoint
+        const assetsResponse = await fetch(
+          `${API_BASE}/assets/?limit=${maxResults}&search=${encodeURIComponent(searchQuery)}`
         );
-      case "running":
-        return (
-          <Badge className="gap-1 bg-blue-500 hover:bg-blue-600">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Running
-          </Badge>
-        );
-      case "completed":
-        return (
-          <Badge className="gap-1 bg-emerald-500 hover:bg-emerald-600">
-            <CheckCircle className="h-3 w-3" />
-            Completed
-          </Badge>
-        );
-      case "failed":
-        return (
-          <Badge variant="destructive" className="gap-1">
-            <AlertCircle className="h-3 w-3" />
-            Failed
-          </Badge>
-        );
-      default:
-        return <Badge variant="outline">{status}</Badge>;
+        
+        if (assetsResponse.ok) {
+          const assetsData = await assetsResponse.json();
+          mappedAssets = (assetsData.assets || []).map((a: any) => ({
+            adobe_id: a.adobe_id,
+            title: a.title,
+            thumbnail_url: a.thumbnail_url,
+            preview_url: a.preview_url,
+            asset_type: a.asset_type || "photo",
+            contributor_name: a.contributor_name,
+            contributor_id: a.contributor_id,
+            is_premium: a.is_premium,
+            is_ai_generated: a.is_ai_generated,
+            is_editorial: a.is_editorial,
+            width: a.width,
+            height: a.height,
+            orientation: a.orientation,
+            keyword_count: a.keywords?.length || 0,
+            keywords: a.keywords,
+          }));
+        }
+      }
+      
+      // Cache the results
+      if (mappedAssets.length > 0) {
+        setCache(searchQuery, maxResults, mappedAssets);
+      }
+      
+      setResults(mappedAssets);
+    } catch (error) {
+      console.error("Search error:", error);
+      setLoadingMessage("Search failed. Please try again.");
+    } finally {
+      stopProgress();
+      setIsSearching(false);
     }
   };
 
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") handleSearch();
+  };
+
+  const clearCache = () => {
+    searchCache.clear();
+    setFromCache(false);
+  };
+
+  const handleAddToLibrary = async (asset: AssetData) => {
+    // Call API to add asset to library
+    const response = await fetch(`${API_BASE}/assets/${asset.adobe_id}/library`, {
+      method: "POST",
+    });
+    
+    if (!response.ok) {
+      throw new Error("Failed to add to library");
+    }
+    
+    // Mark it as added in the session tracker
+    addedToLibrary.add(asset.adobe_id);
+  };
+  
+  const isInLibrary = (assetId: string) => addedToLibrary.has(assetId);
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Adobe Stock Scraper</h1>
-        <p className="text-muted-foreground">
-          Scrape product data from Adobe Stock search results
-        </p>
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Scraper Form */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Search className="h-5 w-5" />
-              New Scrape Job
-            </CardTitle>
-            <CardDescription>
-              Enter a search query to scrape Adobe Stock results
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="query">Search Query</Label>
-              <Input
-                id="query"
-                placeholder="e.g., minimalist home office"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="maxResults">Maximum Results</Label>
-              <Input
-                id="maxResults"
-                type="number"
-                min={50}
-                max={2000}
-                value={maxResults}
-                onChange={(e) => setMaxResults(parseInt(e.target.value) || 500)}
-              />
-              <p className="text-xs text-muted-foreground">
-                Recommended: 500-1000 for comprehensive data
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="scrapeDetails"
-                checked={scrapeDetails}
-                onChange={(e) => setScrapeDetails(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              <Label htmlFor="scrapeDetails" className="text-sm font-normal">
-                Scrape keyword details (slower but more data)
-              </Label>
-            </div>
-
-            <Button
-              className="w-full gap-2"
-              onClick={handleStartScrape}
-              disabled={!query.trim() || isRunning}
+    <div className="min-h-screen">
+      {/* Hero Search Section */}
+      <div className={`transition-all duration-500 ${hasSearched ? "py-6" : "py-20"}`}>
+        <AnimatePresence mode="wait">
+          {!hasSearched && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="text-center mb-8"
             >
-              {isRunning ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Scraping...
-                </>
-              ) : (
-                <>
-                  <Play className="h-4 w-4" />
-                  Start Scraping
-                </>
-              )}
-            </Button>
-          </CardContent>
-        </Card>
-
-        {/* Instructions */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Terminal className="h-5 w-5" />
-              Command Line Usage
-            </CardTitle>
-            <CardDescription>
-              Run the scraper from your terminal for more control
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="rounded-lg bg-muted p-4 font-mono text-sm">
-              <p className="text-muted-foreground"># Install dependencies</p>
-              <p>cd scraper && pip install -r requirements.txt</p>
-              <br />
-              <p className="text-muted-foreground"># Basic usage</p>
-              <p>python adobe_stock_scraper.py "home office" -n 500</p>
-              <br />
-              <p className="text-muted-foreground"># With keyword details</p>
-              <p>python adobe_stock_scraper.py "remote work" -n 200 --details</p>
-              <br />
-              <p className="text-muted-foreground"># Interactive mode</p>
-              <p>python run_scraper.py</p>
-            </div>
-
-            <div className="text-sm text-muted-foreground space-y-2">
-              <p>
-                <strong>Tip:</strong> For best results, run the scraper from the
-                command line. The web interface shows a preview of the workflow.
+              <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-violet-600 via-blue-600 to-emerald-600 bg-clip-text text-transparent mb-4">
+                Discover Stock Assets
+              </h1>
+              <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
+                Search and analyze millions of stock photos, videos, and vectors from Adobe Stock
               </p>
-              <p>
-                Results are saved to <code>scraper/output/</code> as CSV and JSON
-                files.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-      {/* Jobs History */}
-      {jobs.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Scrape Jobs</CardTitle>
-            <CardDescription>Recent scraping jobs and their status</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {jobs.map((job) => (
-                <div
-                  key={job.id}
-                  className="flex items-center justify-between p-4 rounded-lg border"
+        {/* Search Bar */}
+        <motion.div
+          layout
+          className={`max-w-3xl mx-auto ${hasSearched ? "" : "px-4"}`}
+        >
+          <div className="relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-violet-500/20 via-blue-500/20 to-emerald-500/20 rounded-2xl blur-xl" />
+            <div className="relative bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-800 p-2">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-3 px-4">
+                  <Search className="h-5 w-5 text-muted-foreground" />
+                  <Input
+                    type="text"
+                    placeholder="Search for stock assets..."
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    className="border-0 bg-transparent text-lg focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/60"
+                    disabled={isSearching}
+                  />
+                  {query && (
+                    <button
+                      onClick={() => setQuery("")}
+                      className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+                    >
+                      <X className="h-4 w-4 text-muted-foreground" />
+                    </button>
+                  )}
+                </div>
+                
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={showFilters ? "bg-violet-100 dark:bg-violet-900/30" : ""}
                 >
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium">{job.query}</p>
-                      {getStatusBadge(job.status)}
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      Started: {new Date(job.startedAt).toLocaleString()}
-                      {job.completedAt && (
-                        <> • Completed: {new Date(job.completedAt).toLocaleString()}</>
-                      )}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    {job.status === "running" && (
-                      <div className="w-32">
-                        <Progress value={45} className="h-2" />
+                  <SlidersHorizontal className="h-5 w-5" />
+                </Button>
+                
+                <Button
+                  onClick={handleSearch}
+                  disabled={!query.trim() || isSearching}
+                  className="bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white px-6 rounded-xl"
+                >
+                  {isSearching ? (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                    >
+                      <Sparkles className="h-5 w-5" />
+                    </motion.div>
+                  ) : (
+                    "Search"
+                  )}
+                </Button>
+              </div>
+              
+              {/* Filters panel */}
+              <AnimatePresence>
+                {showFilters && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="pt-4 mt-2 border-t border-gray-200 dark:border-gray-800">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-muted-foreground">Results:</span>
+                          <select
+                            value={maxResults}
+                            onChange={(e) => setMaxResults(parseInt(e.target.value))}
+                            className="bg-gray-100 dark:bg-gray-800 rounded-lg px-3 py-1.5 text-sm border-0 focus:ring-2 focus:ring-violet-500"
+                          >
+                            <option value={10}>10</option>
+                            <option value={20}>20</option>
+                            <option value={50}>50</option>
+                            <option value={100}>100</option>
+                          </select>
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="cursor-pointer hover:bg-violet-100 dark:hover:bg-violet-900/30">
+                            <ImageIcon className="h-3 w-3 mr-1" />
+                            Photos
+                          </Badge>
+                          <Badge variant="outline" className="cursor-pointer hover:bg-violet-100 dark:hover:bg-violet-900/30">
+                            <Video className="h-3 w-3 mr-1" />
+                            Videos
+                          </Badge>
+                          <Badge variant="outline" className="cursor-pointer hover:bg-violet-100 dark:hover:bg-violet-900/30">
+                            <Layers className="h-3 w-3 mr-1" />
+                            Vectors
+                          </Badge>
+                        </div>
+                        
+                        {searchCache.size > 0 && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={clearCache}
+                            className="ml-auto text-xs"
+                          >
+                            <Database className="h-3 w-3 mr-1" />
+                            Clear Cache ({searchCache.size})
+                          </Button>
+                        )}
                       </div>
-                    )}
-                    {job.status === "completed" && (
-                      <>
-                        <span className="text-sm font-medium">
-                          {job.resultsCount} results
-                        </span>
-                        <Button variant="outline" size="sm" className="gap-1">
-                          <Download className="h-4 w-4" />
-                          Export
-                        </Button>
-                      </>
-                    )}
-                    {job.status === "failed" && (
-                      <span className="text-sm text-destructive">{job.error}</span>
-                    )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Suggestions */}
+        <AnimatePresence>
+          {!hasSearched && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="mt-8 text-center"
+            >
+              {recentSearches.length > 0 && (
+                <div className="mb-6">
+                  <p className="text-sm text-muted-foreground mb-3 flex items-center justify-center gap-2">
+                    <Clock className="h-4 w-4" />
+                    Recent searches
+                  </p>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {recentSearches.map((search) => (
+                      <Badge
+                        key={search}
+                        variant="secondary"
+                        className="cursor-pointer hover:bg-violet-100 dark:hover:bg-violet-900/30 transition-colors"
+                        onClick={() => {
+                          setQuery(search);
+                        }}
+                      >
+                        {checkCache(search, maxResults) && (
+                          <Zap className="h-3 w-3 mr-1 text-amber-500" />
+                        )}
+                        {search}
+                      </Badge>
+                    ))}
                   </div>
                 </div>
+              )}
+              
+              <p className="text-sm text-muted-foreground mb-3 flex items-center justify-center gap-2">
+                <TrendingUp className="h-4 w-4" />
+                Popular searches
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {SUGGESTED_SEARCHES.map((suggestion) => (
+                  <Badge
+                    key={suggestion}
+                    variant="outline"
+                    className="cursor-pointer hover:bg-violet-100 dark:hover:bg-violet-900/30 transition-colors"
+                    onClick={() => setQuery(suggestion)}
+                  >
+                    {suggestion}
+                  </Badge>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Loading State */}
+      <AnimatePresence>
+        {isSearching && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <HolographicLoader progress={progress} message={loadingMessage} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Results Grid */}
+      <AnimatePresence>
+        {!isSearching && results.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-8"
+          >
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-2">
+                  Search Results
+                  {fromCache && (
+                    <Badge variant="secondary" className="text-xs font-normal">
+                      <Zap className="h-3 w-3 mr-1 text-amber-500" />
+                      From Cache
+                    </Badge>
+                  )}
+                </h2>
+                <p className="text-muted-foreground">
+                  Found {results.length} assets for "{query}"
+                </p>
+              </div>
+              <Badge variant="secondary" className="text-sm">
+                {results.length} results
+              </Badge>
+            </div>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {results.map((asset, index) => (
+                <AssetCard 
+                  key={asset.adobe_id} 
+                  asset={asset} 
+                  index={index}
+                  showAddToLibrary={true}
+                  inLibrary={isInLibrary(asset.adobe_id)}
+                  onAddToLibrary={handleAddToLibrary}
+                />
               ))}
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Empty State */}
-      {jobs.length === 0 && (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <Search className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No scrape jobs yet</h3>
-            <p className="text-muted-foreground mb-4">
-              Enter a search query above to start scraping Adobe Stock data
-            </p>
-          </CardContent>
-        </Card>
+      {/* Empty state after search */}
+      {!isSearching && hasSearched && results.length === 0 && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="text-center py-20"
+        >
+          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-violet-500/20 to-blue-500/20 flex items-center justify-center">
+            <Search className="h-10 w-10 text-muted-foreground" />
+          </div>
+          <h3 className="text-xl font-semibold mb-2">No results found</h3>
+          <p className="text-muted-foreground mb-6">
+            Try adjusting your search terms or browse popular categories
+          </p>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setHasSearched(false);
+              setQuery("");
+            }}
+          >
+            Start New Search
+          </Button>
+        </motion.div>
       )}
     </div>
   );

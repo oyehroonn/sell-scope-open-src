@@ -64,7 +64,7 @@ class Asset(Base):
     asset_keywords = relationship("AssetKeyword", back_populates="asset")
     asset_categories = relationship("AssetCategory", back_populates="asset")
     contributor_highlights = relationship("ContributorHighlight", back_populates="asset")
-    metadata = relationship("AssetMetadata", back_populates="asset")
+    asset_metadata = relationship("AssetMetadata", back_populates="asset")
     similar_from = relationship("SimilarAsset", foreign_keys="SimilarAsset.asset_id", back_populates="asset")
     similar_to = relationship("SimilarAsset", foreign_keys="SimilarAsset.similar_to_asset_id", back_populates="similar_to_asset")
 

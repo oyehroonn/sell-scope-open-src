@@ -67,6 +67,20 @@ class FullImportResponse(BaseModel):
     errors: List[str]
 
 
+class LiveScrapeRequest(BaseModel):
+    query: str
+    max_results: int = 20
+    scrape_details: bool = True
+
+
+class LiveScrapeResponse(BaseModel):
+    status: str
+    message: str
+    results_count: int
+    assets: List[Dict[str, Any]]
+    errors: List[str]
+
+
 @router.post("/job", response_model=ScrapeJobResponse)
 async def create_scrape_job(
     request: ScrapeRequest,
@@ -315,15 +329,28 @@ async def full_import_scrape_results(
     Full import: populates Search, Contributor, Asset, Keyword, AssetKeyword,
     SearchResult, SimilarAsset, Category, AssetCategory.
     Send JSON from scraper export (query, results, similar_results).
+    Uses CSV store when USE_CSV_STORE=True; otherwise Postgres.
     """
-    from app.services.full_import_service import full_import
-    counts = await full_import(
-        db,
-        query=request.query,
-        results=request.results,
-        similar_results=request.similar_results,
-    )
-    await db.commit()
+    from app.core.config import settings
+    if getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False):
+        from app.store import get_store
+        from app.services.full_import_service import full_import_csv
+        store = get_store()
+        counts = full_import_csv(
+            store,
+            query=request.query,
+            results=request.results,
+            similar_results=request.similar_results,
+        )
+    else:
+        from app.services.full_import_service import full_import
+        counts = await full_import(
+            db,
+            query=request.query,
+            results=request.results,
+            similar_results=request.similar_results,
+        )
+        await db.commit()
     errors = counts.pop("errors", [])
     return FullImportResponse(
         status="success",
@@ -331,6 +358,116 @@ async def full_import_scrape_results(
         counts=counts,
         errors=errors[:20],
     )
+
+
+@router.post("/live-scrape", response_model=LiveScrapeResponse)
+async def live_scrape(
+    request: LiveScrapeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run the Adobe Stock scraper live and return results.
+    This endpoint actually executes the scraper and imports results.
+    """
+    import subprocess
+    import json
+    import os
+    from pathlib import Path
+    from app.core.config import settings
+    
+    errors = []
+    results = []
+    
+    try:
+        scraper_dir = Path(__file__).parent.parent.parent.parent.parent / "scraper"
+        if not scraper_dir.exists():
+            scraper_dir = Path("/Users/oyehroonn/Downloads/SellScope/sell-scope-open-src/scraper")
+        
+        cmd = [
+            "python3",
+            "adobe_stock_scraper.py",
+            request.query,
+            "-n", str(request.max_results),
+            "--headless",
+            "--json",
+        ]
+        if request.scrape_details:
+            cmd.append("--details")
+        
+        result = subprocess.run(
+            cmd,
+            cwd=str(scraper_dir),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        
+        if result.returncode != 0:
+            errors.append(f"Scraper error: {result.stderr[:500]}")
+        
+        output_dir = scraper_dir / "output"
+        json_files = sorted(output_dir.glob(f"adobe_stock_{request.query.replace(' ', '_')}*.json"), reverse=True)
+        
+        if json_files:
+            with open(json_files[0], "r") as f:
+                data = json.load(f)
+                results = data.get("results", [])
+                similar = data.get("similar_results", [])
+        
+        if results:
+            if getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False):
+                from app.store import get_store
+                from app.services.full_import_service import full_import_csv
+                store = get_store()
+                full_import_csv(store, request.query, results, similar)
+            else:
+                from app.services.full_import_service import full_import
+                await full_import(db, request.query, results, similar)
+                await db.commit()
+        
+        mapped_assets = []
+        for item in results:
+            mapped_assets.append({
+                "adobe_id": str(item.get("asset_id", "")),
+                "title": item.get("title"),
+                "thumbnail_url": item.get("thumbnail_url"),
+                "preview_url": item.get("preview_url") or item.get("asset_url"),
+                "asset_type": item.get("asset_type", "photo"),
+                "contributor_name": item.get("contributor_name"),
+                "contributor_id": item.get("contributor_id"),
+                "is_premium": item.get("is_premium", False),
+                "is_ai_generated": item.get("is_ai_generated", False),
+                "is_editorial": item.get("is_editorial", False),
+                "width": item.get("width"),
+                "height": item.get("height"),
+                "orientation": item.get("orientation"),
+                "keyword_count": item.get("keyword_count", 0),
+            })
+        
+        return LiveScrapeResponse(
+            status="success",
+            message=f"Scraped {len(results)} results for '{request.query}'",
+            results_count=len(results),
+            assets=mapped_assets,
+            errors=errors[:10],
+        )
+        
+    except subprocess.TimeoutExpired:
+        return LiveScrapeResponse(
+            status="error",
+            message="Scraper timed out after 5 minutes",
+            results_count=0,
+            assets=[],
+            errors=["Scraper timed out"],
+        )
+    except Exception as e:
+        return LiveScrapeResponse(
+            status="error",
+            message=str(e),
+            results_count=0,
+            assets=[],
+            errors=[str(e)],
+        )
 
 
 @router.get("/results/{keyword}")

@@ -40,7 +40,7 @@ const navigation = [
     icon: Database,
   },
   {
-    name: "Scraped Assets",
+    name: "Asset Library",
     href: "/dashboard/assets",
     icon: ImageIcon,
   },
