@@ -367,7 +367,10 @@ export function EnhancedDetailsModal({
               {activeTab === "market" && (
                 <div className="space-y-6">
                   {deepAnalysis?.market_analysis ? (
-                    <MarketCharts marketAnalysis={deepAnalysis.market_analysis} />
+                    <MarketCharts 
+                      marketAnalysis={deepAnalysis.market_analysis} 
+                      visualizations={deepAnalysis.visualizations}
+                    />
                   ) : (
                     <div className="text-center py-12">
                       <BarChart3 className="h-12 w-12 mx-auto text-gray-300 mb-4" />

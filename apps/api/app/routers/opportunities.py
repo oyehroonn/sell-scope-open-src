@@ -38,14 +38,24 @@ class NicheScore(BaseModel):
     avg_competition_score: float = 0
     top_keywords: List[str] = []
     trend: str = "stable"
+    unique_contributors: int = 0
+    premium_ratio: float = 0.0
+    estimated_results: int = 0
 
 
 class HeatmapItem(BaseModel):
     name: str
     slug: str
     score: float
-    assets: int
+    demand: float = 0
     competition: float
+    assets: int
+    keywords: int = 0
+    top_keywords: List[str] = []
+    unique_contributors: int = 0
+    premium_ratio: float = 0.0
+    estimated_results: int = 0
+    trend: str = "stable"
 
 
 class HeatmapResponse(BaseModel):
@@ -226,7 +236,7 @@ async def get_niche(
 async def get_opportunity_heatmap(
     db: AsyncSession = Depends(get_db),
 ):
-    """Get category heatmap data for visualization."""
+    """Get category heatmap data for visualization with full metrics."""
     if getattr(settings, "USE_CSV_STORE", False) or getattr(settings, "USE_PANDAS_STORE", False):
         from app.store import get_store
         from app.services.keyword_analyzer import get_opportunity_heatmap
@@ -240,8 +250,15 @@ async def get_opportunity_heatmap(
                     name=h.get("name", ""),
                     slug=h.get("slug", ""),
                     score=h.get("score", 0),
-                    assets=h.get("assets", 0),
+                    demand=h.get("demand", 0),
                     competition=h.get("competition", 0),
+                    assets=h.get("assets", 0),
+                    keywords=h.get("keywords", 0),
+                    top_keywords=h.get("top_keywords", [])[:5],
+                    unique_contributors=h.get("unique_contributors", 0),
+                    premium_ratio=h.get("premium_ratio", 0),
+                    estimated_results=h.get("estimated_results", 0),
+                    trend=h.get("trend", "stable"),
                 )
                 for h in result.get("heatmap", [])
             ],

@@ -447,18 +447,22 @@ def get_keyword_suggestions(store, query: str, limit: int = 10) -> List[str]:
 
 def calculate_category_opportunities(store) -> List[Dict[str, Any]]:
     """Calculate opportunity scores for each category/niche."""
-    # Recalculate niche scores
+    # Recalculate niche scores from keyword data
     store.calculate_niche_scores_from_keywords()
     
     # Get all niche scores
     niches = store.get_all_niche_scores(limit=100)
     
-    if not niches:
-        # Generate from asset categories
-        categories_df = store._asset_categories
-        if categories_df.empty:
-            return []
-        
+    if niches:
+        # Ensure all niches have required fields
+        for niche in niches:
+            if "slug" not in niche or not niche["slug"]:
+                niche["slug"] = niche.get("name", "unknown").lower().replace(" ", "-").replace("&", "and")
+        return niches
+    
+    # Fallback: Generate from asset categories
+    categories_df = store._asset_categories
+    if not categories_df.empty:
         category_counts = categories_df["category_name"].value_counts()
         
         results = []
@@ -481,33 +485,125 @@ def calculate_category_opportunities(store) -> List[Dict[str, Any]]:
                 "avg_demand_score": scores["demand_score"],
                 "avg_competition_score": scores["competition_score"],
                 "trend": scores["trend"],
+                "top_keywords": [],
             })
         
         # Sort by opportunity score
         results.sort(key=lambda x: x["avg_opportunity_score"], reverse=True)
         return results[:50]
     
-    return niches
+    # Final fallback: Generate from keyword metrics categories
+    keyword_metrics = store.get_keyword_metrics_df()
+    if not keyword_metrics.empty:
+        category_data = {}
+        
+        for _, row in keyword_metrics.iterrows():
+            categories = row.get("categories") or []
+            if isinstance(categories, str):
+                try:
+                    import ast
+                    categories = ast.literal_eval(categories)
+                except:
+                    categories = []
+            
+            keyword = row.get("keyword", "")
+            opp_score = row.get("opportunity_score", 50)
+            demand_score = row.get("demand_score", 50)
+            comp_score = row.get("competition_score", 50)
+            
+            for cat in categories:
+                cat_name = cat.get("name") if isinstance(cat, dict) else str(cat)
+                if not cat_name:
+                    continue
+                
+                if cat_name not in category_data:
+                    category_data[cat_name] = {
+                        "keywords": [],
+                        "opp_scores": [],
+                        "demand_scores": [],
+                        "comp_scores": [],
+                        "total_assets": 0,
+                    }
+                
+                category_data[cat_name]["keywords"].append(keyword)
+                category_data[cat_name]["opp_scores"].append(opp_score)
+                category_data[cat_name]["demand_scores"].append(demand_score)
+                category_data[cat_name]["comp_scores"].append(comp_score)
+                if isinstance(cat, dict):
+                    category_data[cat_name]["total_assets"] += cat.get("count", 1)
+        
+        results = []
+        for cat_name, data in category_data.items():
+            if not data["opp_scores"]:
+                continue
+            
+            avg_opp = sum(data["opp_scores"]) / len(data["opp_scores"])
+            avg_demand = sum(data["demand_scores"]) / len(data["demand_scores"])
+            avg_comp = sum(data["comp_scores"]) / len(data["comp_scores"])
+            
+            results.append({
+                "name": cat_name,
+                "slug": cat_name.lower().replace(" ", "-").replace("&", "and"),
+                "total_assets": data["total_assets"],
+                "total_keywords": len(data["keywords"]),
+                "avg_opportunity_score": round(avg_opp, 2),
+                "avg_demand_score": round(avg_demand, 2),
+                "avg_competition_score": round(avg_comp, 2),
+                "top_keywords": data["keywords"][:5],
+                "trend": "up" if avg_demand >= 70 else "stable" if avg_demand >= 40 else "down",
+            })
+        
+        results.sort(key=lambda x: x["avg_opportunity_score"], reverse=True)
+        return results[:50]
+    
+    return []
 
 
 def get_opportunity_heatmap(store) -> Dict[str, Any]:
-    """Get heatmap data for opportunities visualization."""
-    # Get niche scores
+    """Get heatmap data for opportunities visualization with full metrics."""
+    # Get niche scores from store (now includes enhanced data)
     niches = store.get_niche_heatmap()
     
     if not niches:
-        # Generate from categories
+        # Generate from category opportunities
         categories = calculate_category_opportunities(store)
         niches = [
             {
-                "name": c["name"],
-                "slug": c["slug"],
-                "score": c["avg_opportunity_score"],
-                "assets": c["total_assets"],
-                "competition": c["avg_competition_score"],
+                "name": c.get("name", "Unknown"),
+                "slug": c.get("slug", c.get("name", "unknown").lower().replace(" ", "-")),
+                "score": c.get("avg_opportunity_score", 50),
+                "demand": c.get("avg_demand_score", 50),
+                "competition": c.get("avg_competition_score", 50),
+                "assets": c.get("total_assets", 0),
+                "keywords": c.get("total_keywords", 0),
+                "top_keywords": c.get("top_keywords", [])[:5],
+                "unique_contributors": c.get("unique_contributors", 0),
+                "premium_ratio": c.get("premium_ratio", 0),
+                "estimated_results": c.get("estimated_results", 0),
+                "trend": c.get("trend", "stable"),
             }
             for c in categories
+            if c.get("name")
         ]
+    
+    # Ensure all items have required fields
+    for niche in niches:
+        if "slug" not in niche or not niche["slug"]:
+            niche["slug"] = niche.get("name", "unknown").lower().replace(" ", "-").replace("&", "and")
+        if "score" not in niche:
+            niche["score"] = 50
+        if "demand" not in niche:
+            niche["demand"] = 50
+        if "assets" not in niche:
+            niche["assets"] = 0
+        if "competition" not in niche:
+            niche["competition"] = 50
+        if "keywords" not in niche:
+            niche["keywords"] = 0
+        if "top_keywords" not in niche:
+            niche["top_keywords"] = []
+        if "trend" not in niche:
+            niche["trend"] = "stable"
     
     return {
         "heatmap": niches,

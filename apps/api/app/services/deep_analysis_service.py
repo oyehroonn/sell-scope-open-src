@@ -28,6 +28,14 @@ class DeepAnalysisService:
     def __init__(self, store):
         self.store = store
     
+    def _calculate_trend(self, demand_score: float, competition_score: float) -> str:
+        """Calculate trend based on demand vs competition."""
+        if demand_score > competition_score * 1.2 and demand_score >= 60:
+            return "up"
+        elif demand_score < competition_score * 0.8 or demand_score < 30:
+            return "down"
+        return "stable"
+    
     async def analyze_keyword_deep(
         self,
         keyword: str,
@@ -77,11 +85,16 @@ class DeepAnalysisService:
             # Update keyword metrics with enhanced scores
             scoring = result.get("scoring", {})
             search_results = result.get("search_results", {})
+            market_analysis = result.get("market_analysis", {})
+            visualizations = result.get("visualizations", {})
+            
+            # Get categories from market analysis (more comprehensive than search_results)
+            categories = market_analysis.get("top_categories", []) or search_results.get("categories", [])
             
             self.store.upsert_keyword_metrics({
                 "keyword": keyword_lower,
                 "nb_results": search_results.get("nb_results", 0),
-                "unique_contributors": result.get("market_analysis", {}).get("unique_contributors", 0),
+                "unique_contributors": market_analysis.get("unique_contributors", 0),
                 "demand_score": scoring.get("demand_score", 0),
                 "competition_score": scoring.get("competition_score", 0),
                 "gap_score": scoring.get("gap_score", 0),
@@ -90,9 +103,57 @@ class DeepAnalysisService:
                 "trend": scoring.get("trend", "stable"),
                 "urgency": scoring.get("urgency", "medium"),
                 "related_searches": search_results.get("related_searches", []),
-                "categories": search_results.get("categories", []),
+                "categories": categories,
                 "scraped_at": result.get("scraped_at"),
             })
+            
+            # Store niche scores from visualization data (using actual scraped metrics)
+            niche_analysis = visualizations.get("niche_analysis", [])
+            for niche in niche_analysis:
+                if niche.get("name"):
+                    # Use actual scraped data - no hardcoded values
+                    self.store.upsert_niche_score({
+                        "name": niche.get("name"),
+                        "total_assets": niche.get("asset_count", 0),
+                        "total_keywords": niche.get("keyword_count", 0),
+                        "avg_opportunity_score": niche.get("opportunity_score", 0),
+                        "avg_demand_score": niche.get("demand_score", 0),
+                        "avg_competition_score": niche.get("competition_score", 0),
+                        "top_keywords": niche.get("keywords", []),
+                        "trend": self._calculate_trend(
+                            niche.get("demand_score", 0),
+                            niche.get("competition_score", 0)
+                        ),
+                        "unique_contributors": niche.get("unique_contributors", 0),
+                        "premium_ratio": niche.get("premium_ratio", 0),
+                        "avg_price": niche.get("avg_price"),
+                        "category": niche.get("category", ""),
+                        "source_keyword": keyword_lower,
+                    })
+            
+            # Store category heatmap data (using actual scraped metrics)
+            category_heatmap = visualizations.get("category_heatmap", [])
+            for cat in category_heatmap:
+                if cat.get("name"):
+                    # Use actual category-specific metrics from scraping
+                    self.store.upsert_niche_score({
+                        "name": cat.get("name"),
+                        "total_assets": cat.get("count", 0),
+                        "total_keywords": cat.get("keyword_count", 0),
+                        "avg_opportunity_score": cat.get("opportunity_score", 0),
+                        "avg_demand_score": cat.get("demand_score", 0),
+                        "avg_competition_score": cat.get("competition_score", 0),
+                        "top_keywords": cat.get("top_keywords", []),
+                        "trend": self._calculate_trend(
+                            cat.get("demand_score", 0),
+                            cat.get("competition_score", 0)
+                        ),
+                        "unique_contributors": cat.get("unique_contributors", 0),
+                        "premium_ratio": cat.get("premium_ratio", 0),
+                        "estimated_results": cat.get("estimated_results", 0),
+                        "price_analysis": cat.get("price_analysis", {}),
+                        "source_keyword": keyword_lower,
+                    })
         
         result["source"] = "live"
         return result

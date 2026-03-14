@@ -85,10 +85,12 @@ class PandasStore:
             "gap_score", "freshness_score", "opportunity_score", "trend", "urgency",
             "related_searches", "categories", "scraped_at", "created_at", "updated_at"
         ])
-        # Niche/category scores for heatmap
+        # Niche/category scores for heatmap (enhanced with more metrics)
         self._niche_scores: pd.DataFrame = pd.DataFrame(columns=[
             "name", "slug", "total_assets", "total_keywords", "avg_opportunity_score",
             "avg_demand_score", "avg_competition_score", "top_keywords", "trend",
+            "unique_contributors", "premium_ratio", "avg_price", "estimated_results",
+            "price_analysis", "category", "source_keywords",
             "scraped_at", "created_at", "updated_at"
         ])
         # Contributor profiles for competitor analysis
@@ -562,7 +564,7 @@ class PandasStore:
     
     # ——— Niche Scores ———
     def upsert_niche_score(self, data: Dict[str, Any]) -> None:
-        """Insert or update niche/category score."""
+        """Insert or update niche/category score with aggregation support."""
         name = (data.get("name") or "").strip()
         if not name:
             return
@@ -570,16 +572,86 @@ class PandasStore:
         slug = data.get("slug") or name.lower().replace(" ", "-").replace("&", "and")
         
         mask = self._niche_scores["slug"] == slug
+        
+        # Get existing data for aggregation
+        existing = None
+        if mask.any():
+            existing = self._row_to_dict(self._niche_scores.loc[mask].iloc[0])
+        
+        # Aggregate keywords from multiple sources
+        new_keywords = data.get("top_keywords", [])
+        existing_keywords = existing.get("top_keywords", []) if existing else []
+        if isinstance(existing_keywords, str):
+            try:
+                existing_keywords = eval(existing_keywords)
+            except:
+                existing_keywords = []
+        
+        # Merge and deduplicate keywords
+        all_keywords = list(dict.fromkeys(new_keywords + existing_keywords))[:20]
+        
+        # Track source keywords for aggregation
+        source_keyword = data.get("source_keyword", "")
+        existing_sources = existing.get("source_keywords", []) if existing else []
+        if isinstance(existing_sources, str):
+            try:
+                existing_sources = eval(existing_sources)
+            except:
+                existing_sources = []
+        if source_keyword and source_keyword not in existing_sources:
+            existing_sources.append(source_keyword)
+        
+        # For existing entries, use weighted average for scores
+        if existing:
+            old_weight = existing.get("total_assets", 1) or 1
+            new_weight = data.get("total_assets", 1) or 1
+            total_weight = old_weight + new_weight
+            
+            # Weighted average of scores
+            avg_opp = (existing.get("avg_opportunity_score", 0) * old_weight + 
+                      data.get("avg_opportunity_score", 0) * new_weight) / total_weight
+            avg_demand = (existing.get("avg_demand_score", 0) * old_weight + 
+                         data.get("avg_demand_score", 0) * new_weight) / total_weight
+            avg_comp = (existing.get("avg_competition_score", 0) * old_weight + 
+                       data.get("avg_competition_score", 0) * new_weight) / total_weight
+            
+            # Accumulate totals
+            total_assets = existing.get("total_assets", 0) + data.get("total_assets", 0)
+            total_keywords = len(all_keywords)
+            unique_contributors = max(
+                existing.get("unique_contributors", 0),
+                data.get("unique_contributors", 0)
+            )
+            estimated_results = max(
+                existing.get("estimated_results", 0),
+                data.get("estimated_results", 0)
+            )
+        else:
+            avg_opp = data.get("avg_opportunity_score", 0)
+            avg_demand = data.get("avg_demand_score", 0)
+            avg_comp = data.get("avg_competition_score", 0)
+            total_assets = data.get("total_assets", 0)
+            total_keywords = data.get("total_keywords", 0)
+            unique_contributors = data.get("unique_contributors", 0)
+            estimated_results = data.get("estimated_results", 0)
+        
         row = {
             "name": name,
             "slug": slug,
-            "total_assets": data.get("total_assets", 0),
-            "total_keywords": data.get("total_keywords", 0),
-            "avg_opportunity_score": data.get("avg_opportunity_score", 0),
-            "avg_demand_score": data.get("avg_demand_score", 0),
-            "avg_competition_score": data.get("avg_competition_score", 0),
-            "top_keywords": data.get("top_keywords", []),
+            "total_assets": total_assets,
+            "total_keywords": total_keywords,
+            "avg_opportunity_score": round(avg_opp, 2),
+            "avg_demand_score": round(avg_demand, 2),
+            "avg_competition_score": round(avg_comp, 2),
+            "top_keywords": all_keywords,
             "trend": data.get("trend", "stable"),
+            "unique_contributors": unique_contributors,
+            "premium_ratio": data.get("premium_ratio", 0),
+            "avg_price": data.get("avg_price"),
+            "estimated_results": estimated_results,
+            "price_analysis": data.get("price_analysis", {}),
+            "category": data.get("category", ""),
+            "source_keywords": existing_sources,
             "scraped_at": data.get("scraped_at") or now,
             "updated_at": now,
         }
@@ -610,18 +682,33 @@ class PandasStore:
         return [self._row_to_dict(row) for _, row in df.iterrows()]
     
     def get_niche_heatmap(self) -> List[Dict]:
-        """Get niche data formatted for heatmap visualization."""
+        """Get niche data formatted for heatmap visualization with full metrics."""
         df = self._niche_scores.sort_values("avg_opportunity_score", ascending=False)
-        return [
-            {
+        results = []
+        for _, row in df.iterrows():
+            # Parse top_keywords if stored as string
+            top_keywords = row.get("top_keywords", [])
+            if isinstance(top_keywords, str):
+                try:
+                    top_keywords = eval(top_keywords)
+                except:
+                    top_keywords = []
+            
+            results.append({
                 "name": row.get("name"),
                 "slug": row.get("slug"),
                 "score": row.get("avg_opportunity_score", 0),
-                "assets": row.get("total_assets", 0),
+                "demand": row.get("avg_demand_score", 0),
                 "competition": row.get("avg_competition_score", 0),
-            }
-            for _, row in df.iterrows()
-        ]
+                "assets": row.get("total_assets", 0),
+                "keywords": row.get("total_keywords", 0),
+                "top_keywords": top_keywords[:5] if top_keywords else [],
+                "unique_contributors": row.get("unique_contributors", 0),
+                "premium_ratio": row.get("premium_ratio", 0),
+                "estimated_results": row.get("estimated_results", 0),
+                "trend": row.get("trend", "stable"),
+            })
+        return results
     
     def calculate_niche_scores_from_keywords(self) -> None:
         """Recalculate niche scores by aggregating keyword metrics by category."""

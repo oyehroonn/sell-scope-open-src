@@ -13,10 +13,44 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  Treemap,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DollarSign, FileType, Layers, Percent } from "lucide-react";
+import { DollarSign, FileType, Layers, Percent, Grid3X3, Target, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+
+interface CategoryHeatmapItem {
+  name: string;
+  slug: string;
+  count: number;
+  percentage: number;
+  demand_score: number;
+  competition_score: number;
+  opportunity_score: number;
+  competition_level: string;
+  unique_contributors?: number;
+  premium_ratio?: number;
+  top_keywords?: string[];
+  keyword_count?: number;
+  estimated_results?: number;
+}
+
+interface NicheAnalysisItem {
+  name: string;
+  score: number;
+  demand_score: number;
+  competition_score: number;
+  opportunity_score: number;
+  keywords: string[];
+  keyword_count: number;
+  asset_count?: number;
+  unique_contributors?: number;
+  premium_ratio?: number;
+  avg_price?: number;
+  category: string;
+  description: string;
+}
 
 interface MarketAnalysis {
   premium_ratio: number;
@@ -47,10 +81,18 @@ interface MarketAnalysis {
   contributor_concentration?: number;
   unique_contributors?: number;
   sample_size?: number;
+  top_categories?: CategoryHeatmapItem[];
+  detected_niches?: NicheAnalysisItem[];
+}
+
+interface Visualizations {
+  category_heatmap?: CategoryHeatmapItem[];
+  niche_analysis?: NicheAnalysisItem[];
 }
 
 interface MarketChartsProps {
   marketAnalysis: MarketAnalysis;
+  visualizations?: Visualizations;
   className?: string;
 }
 
@@ -62,7 +104,7 @@ const COLORS = {
   standard: "#6b7280",
 };
 
-export function MarketCharts({ marketAnalysis, className = "" }: MarketChartsProps) {
+export function MarketCharts({ marketAnalysis, visualizations, className = "" }: MarketChartsProps) {
   const contentTypeData = useMemo(() => {
     const premium = marketAnalysis.premium_ratio || 0;
     const editorial = marketAnalysis.editorial_ratio || 0;
@@ -375,7 +417,237 @@ export function MarketCharts({ marketAnalysis, className = "" }: MarketChartsPro
           )}
         </CardContent>
       </Card>
+
+      {/* Category Heatmap */}
+      <CategoryHeatmap 
+        categories={visualizations?.category_heatmap || marketAnalysis.top_categories || []} 
+      />
+
+      {/* Niche Analysis */}
+      <NicheAnalysis 
+        niches={visualizations?.niche_analysis || marketAnalysis.detected_niches || []} 
+      />
     </div>
+  );
+}
+
+function getOpportunityColor(score: number): string {
+  if (score >= 70) return "bg-emerald-500";
+  if (score >= 50) return "bg-amber-500";
+  return "bg-red-500";
+}
+
+function getOpportunityTextColor(score: number): string {
+  if (score >= 70) return "text-emerald-500";
+  if (score >= 50) return "text-amber-500";
+  return "text-red-500";
+}
+
+function getTrendIcon(trend: string) {
+  if (trend === "up") return <TrendingUp className="h-3 w-3 text-emerald-500" />;
+  if (trend === "down") return <TrendingDown className="h-3 w-3 text-red-500" />;
+  return <Minus className="h-3 w-3 text-gray-400" />;
+}
+
+function CategoryHeatmap({ categories }: { categories: CategoryHeatmapItem[] }) {
+  if (!categories || categories.length === 0) {
+    return (
+      <Card className="md:col-span-2">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Grid3X3 className="h-4 w-4" />
+            Category Heatmap
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col items-center justify-center h-48 text-gray-500 text-sm">
+            <Grid3X3 className="h-8 w-8 mb-2 text-gray-300" />
+            <p>No category data available</p>
+            <p className="text-xs mt-1">Run Deep analysis to analyze categories</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Grid3X3 className="h-4 w-4" />
+          Category Heatmap
+          <Badge variant="secondary" className="ml-auto text-xs">
+            {categories.length} categories
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+          {categories.slice(0, 12).map((cat, index) => (
+            <div
+              key={cat.slug || index}
+              className="p-3 rounded-lg border bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 hover:shadow-md transition-shadow"
+            >
+              <div className="flex items-start justify-between mb-2">
+                <h4 className="font-medium text-sm truncate flex-1" title={cat.name}>
+                  {cat.name}
+                </h4>
+                <Badge 
+                  variant="outline" 
+                  className={`text-xs ml-1 ${getOpportunityTextColor(cat.opportunity_score)}`}
+                >
+                  {cat.opportunity_score?.toFixed(0) || 0}
+                </Badge>
+              </div>
+              
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">Demand</span>
+                  <span className={getOpportunityTextColor(cat.demand_score)}>
+                    {cat.demand_score?.toFixed(0) || 0}
+                  </span>
+                </div>
+                <Progress 
+                  value={cat.demand_score || 0} 
+                  className="h-1.5"
+                />
+                
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">Competition</span>
+                  <span className={cat.competition_score > 60 ? "text-red-500" : cat.competition_score > 30 ? "text-amber-500" : "text-emerald-500"}>
+                    {cat.competition_score?.toFixed(0) || 0}
+                  </span>
+                </div>
+                <Progress 
+                  value={cat.competition_score || 0} 
+                  className="h-1.5"
+                />
+              </div>
+              
+              <div className="mt-2 pt-2 border-t flex items-center justify-between text-xs text-gray-500">
+                <span>{cat.count || 0} assets</span>
+                <span>{cat.keyword_count || 0} keywords</span>
+              </div>
+              
+              {cat.top_keywords && cat.top_keywords.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {cat.top_keywords.slice(0, 3).map((kw, i) => (
+                    <Badge key={i} variant="secondary" className="text-[10px] px-1.5 py-0">
+                      {kw}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NicheAnalysis({ niches }: { niches: NicheAnalysisItem[] }) {
+  if (!niches || niches.length === 0) {
+    return (
+      <Card className="md:col-span-2">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Target className="h-4 w-4" />
+            Niche Opportunities
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col items-center justify-center h-48 text-gray-500 text-sm">
+            <Target className="h-8 w-8 mb-2 text-gray-300" />
+            <p>No niche data available</p>
+            <p className="text-xs mt-1">Run Deep analysis to detect niches</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Target className="h-4 w-4" />
+          Niche Opportunities
+          <Badge variant="secondary" className="ml-auto text-xs">
+            {niches.length} niches detected
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {niches.slice(0, 8).map((niche, index) => (
+            <div
+              key={niche.name || index}
+              className="p-3 rounded-lg border hover:shadow-md transition-shadow"
+            >
+              <div className="flex items-start justify-between mb-2">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-medium text-sm">{niche.name}</h4>
+                    {niche.category && (
+                      <Badge variant="outline" className="text-[10px]">
+                        {niche.category}
+                      </Badge>
+                    )}
+                  </div>
+                  {niche.description && (
+                    <p className="text-xs text-gray-500 mt-0.5">{niche.description}</p>
+                  )}
+                </div>
+                <div className={`text-2xl font-bold ${getOpportunityTextColor(niche.opportunity_score)}`}>
+                  {niche.opportunity_score?.toFixed(0) || 0}
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-4 gap-3 mb-2">
+                <div className="text-center">
+                  <p className="text-xs text-gray-500">Demand</p>
+                  <p className={`font-semibold text-sm ${getOpportunityTextColor(niche.demand_score)}`}>
+                    {niche.demand_score?.toFixed(0) || 0}
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500">Competition</p>
+                  <p className={`font-semibold text-sm ${niche.competition_score > 60 ? "text-red-500" : niche.competition_score > 30 ? "text-amber-500" : "text-emerald-500"}`}>
+                    {niche.competition_score?.toFixed(0) || 0}
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500">Assets</p>
+                  <p className="font-semibold text-sm">{niche.asset_count || 0}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-gray-500">Keywords</p>
+                  <p className="font-semibold text-sm">{niche.keyword_count || 0}</p>
+                </div>
+              </div>
+              
+              {niche.keywords && niche.keywords.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t">
+                  <span className="text-xs text-gray-500 mr-1">Top keywords:</span>
+                  {niche.keywords.slice(0, 5).map((kw, i) => (
+                    <Badge key={i} variant="secondary" className="text-[10px] px-1.5 py-0">
+                      {kw}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              
+              {niche.avg_price && (
+                <div className="mt-2 text-xs text-gray-500">
+                  Avg. price: <span className="font-medium">${niche.avg_price.toFixed(2)}</span>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

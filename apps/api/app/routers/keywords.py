@@ -58,6 +58,9 @@ class MarketAnalysis(BaseModel):
     format_distribution: Dict[str, int] = {}
     content_type_distribution: Dict[str, int] = {}
     contributor_analysis: Dict[str, Any] = {}
+    category_distribution: Dict[str, int] = {}
+    top_categories: List[Dict[str, Any]] = []
+    detected_niches: List[Dict[str, Any]] = []
 
 
 class VisualizationData(BaseModel):
@@ -70,6 +73,10 @@ class VisualizationData(BaseModel):
     contributor_chart: List[Dict[str, Any]] = []
     keyword_cloud: List[Dict[str, Any]] = []
     freshness_timeline: List[Dict[str, Any]] = []
+    category_heatmap: List[Dict[str, Any]] = []
+    niche_analysis: List[Dict[str, Any]] = []
+    upload_dates_available: bool = False
+    upload_dates_message: str = ""
 
 
 class DeepAnalysisResult(BaseModel):

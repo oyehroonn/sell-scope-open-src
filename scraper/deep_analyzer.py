@@ -27,6 +27,12 @@ from config import (
     BASE_URL, SEARCH_URL, ASSET_URL, CONTRIBUTOR_URL, OUTPUT_DIR
 )
 from adobe_stock_scraper import find_chromedriver, get_user_agent
+from category_mapping import (
+    infer_category_from_keywords,
+    detect_niches_from_keywords,
+    calculate_category_distribution,
+    ADOBE_STOCK_CATEGORIES,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -920,6 +926,69 @@ class DeepAnalyzer:
             detail["keywords"] = keywords[:30]  # Keep up to 30 keywords
             logger.debug(f"Extracted {len(keywords)} keywords")
             
+            # ========== CATEGORY EXTRACTION ==========
+            detail["category"] = None
+            detail["category_id"] = None
+            detail["subcategory"] = None
+            
+            # Method 1: Look for explicit category link on asset page
+            category_selectors = [
+                "a[href*='ca=']",  # Category ID in URL
+                "a[href*='category']",
+                "[class*='Category'] a",
+                "[class*='category'] a",
+            ]
+            
+            for selector in category_selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for el in elements:
+                        text = el.text.strip()
+                        href = el.get_attribute("href") or ""
+                        # Check if it's a category link (has ca= parameter)
+                        if text and len(text) > 1 and len(text) < 50 and "ca=" in href:
+                            # Filter out navigation items
+                            if text.lower() not in ["all", "images", "videos", "templates", "3d", "audio", "free", "premium"]:
+                                detail["category"] = text
+                                cat_match = re.search(r'ca=(\d+)', href)
+                                if cat_match:
+                                    detail["category_id"] = int(cat_match.group(1))
+                                logger.debug(f"Found category from link: {text}")
+                                break
+                    if detail["category"]:
+                        break
+                except:
+                    continue
+            
+            # Method 2: Parse from page text (CATEGORY section)
+            if not detail["category"]:
+                try:
+                    # Look for "CATEGORY" label followed by category name
+                    cat_patterns = [
+                        r'CATEGORY\s*\n\s*([A-Za-z\s&]+?)(?:\n|$)',
+                        r'CATEGORÍA\s*\n\s*([A-Za-z\s&áéíóúñ]+?)(?:\n|$)',  # Spanish
+                        r'Category[:\s]+([A-Za-z\s&]+?)(?:\n|$)',
+                    ]
+                    for pattern in cat_patterns:
+                        cat_match = re.search(pattern, page_text, re.IGNORECASE)
+                        if cat_match:
+                            cat_name = cat_match.group(1).strip()
+                            if cat_name and len(cat_name) > 2 and len(cat_name) < 50:
+                                detail["category"] = cat_name
+                                logger.debug(f"Found category from text: {cat_name}")
+                                break
+                except:
+                    pass
+            
+            # Method 3: Infer category from keywords if not found
+            if not detail["category"] and keywords:
+                inferred = infer_category_from_keywords(keywords)
+                if inferred["confidence"] >= 2:  # Only use if reasonably confident
+                    detail["category"] = inferred["name"]
+                    detail["category_id"] = inferred["id"]
+                    detail["category_inferred"] = True
+                    logger.debug(f"Inferred category: {inferred['name']} (confidence: {inferred['confidence']})")
+            
             # ========== DIMENSIONS ==========
             dim_match = re.search(r'(\d{3,5})\s*[x×]\s*(\d{3,5})', page_text)
             if dim_match:
@@ -1692,7 +1761,7 @@ class DeepAnalyzer:
         return profile
     
     def _scrape_similar_assets(self, asset_details: List[Dict], max_per_asset: int) -> List[Dict[str, Any]]:
-        """Scrape similar assets for market network analysis - ENHANCED with price extraction"""
+        """Scrape similar assets for market network analysis - ENHANCED with category/keyword extraction"""
         similar = []
         seen_ids = set()
         
@@ -1706,13 +1775,14 @@ class DeepAnalyzer:
                     all_similar_ids.append({
                         "asset_id": sid,
                         "related_to": asset.get("asset_id"),
+                        "parent_category": asset.get("category"),  # Track parent category
                     })
         
         # Limit total similar assets to scrape
         max_similar_total = min(len(all_similar_ids), 30)
         similar_to_scrape = all_similar_ids[:max_similar_total]
         
-        logger.info(f"Scraping {len(similar_to_scrape)} similar assets for price comparison...")
+        logger.info(f"Scraping {len(similar_to_scrape)} similar assets for category/price data...")
         
         for i, sim_info in enumerate(similar_to_scrape):
             sid = sim_info["asset_id"]
@@ -1720,7 +1790,7 @@ class DeepAnalyzer:
             try:
                 url = f"{BASE_URL}/images/asset/{sid}"
                 
-                # Navigate to similar asset page for price extraction
+                # Navigate to similar asset page
                 self.driver.get(url)
                 self._random_delay(1, 2)
                 
@@ -1730,7 +1800,12 @@ class DeepAnalyzer:
                     "related_to": sim_info["related_to"],
                     "price": None,
                     "contributor_id": None,
+                    "contributor_name": None,
                     "is_premium": False,
+                    "is_editorial": False,
+                    "is_ai_generated": False,
+                    "category": None,
+                    "keywords": [],
                 }
                 
                 try:
@@ -1753,10 +1828,60 @@ class DeepAnalyzer:
                         match = re.search(r'/contributor/(\d+)', href)
                         if match:
                             similar_asset["contributor_id"] = match.group(1)
+                            name = link.text.strip()
+                            if name and len(name) > 1 and len(name) < 100:
+                                similar_asset["contributor_name"] = name
                             break
                     
-                    # Check premium
+                    # Check content types
                     similar_asset["is_premium"] = "premium" in page_source
+                    similar_asset["is_editorial"] = "editorial" in page_source
+                    similar_asset["is_ai_generated"] = any(
+                        marker in page_source 
+                        for marker in ["ai generated", "ai-generated", "generative ai"]
+                    )
+                    
+                    # Extract keywords from similar asset
+                    keywords = []
+                    keyword_selectors = [
+                        "a[href*='search?k=']",
+                        "[class*='keyword'] a",
+                        "[class*='tag'] a",
+                    ]
+                    for selector in keyword_selectors:
+                        try:
+                            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            for el in elements[:15]:
+                                text = el.text.strip()
+                                if text and len(text) > 1 and len(text) < 50:
+                                    if text.lower() not in ["all", "images", "videos", "templates"]:
+                                        keywords.append(text)
+                            if keywords:
+                                break
+                        except:
+                            continue
+                    similar_asset["keywords"] = list(dict.fromkeys(keywords))[:15]
+                    
+                    # Extract category
+                    cat_links = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='ca=']")
+                    for link in cat_links:
+                        text = link.text.strip()
+                        if text and len(text) > 1 and len(text) < 50:
+                            if text.lower() not in ["all", "images", "videos", "templates", "3d", "audio", "free", "premium"]:
+                                similar_asset["category"] = text
+                                break
+                    
+                    # Infer category if not found
+                    if not similar_asset["category"] and similar_asset["keywords"]:
+                        inferred = infer_category_from_keywords(similar_asset["keywords"])
+                        if inferred["confidence"] >= 2:
+                            similar_asset["category"] = inferred["name"]
+                            similar_asset["category_inferred"] = True
+                    
+                    # Fallback to parent category
+                    if not similar_asset["category"] and sim_info.get("parent_category"):
+                        similar_asset["category"] = sim_info["parent_category"]
+                        similar_asset["category_from_parent"] = True
                     
                 except TimeoutException:
                     similar_asset["error"] = "timeout"
@@ -1888,9 +2013,16 @@ class DeepAnalyzer:
                 },
             }
         
-        # ========== KEYWORD FREQUENCY ==========
+        # ========== KEYWORD FREQUENCY (Enhanced) ==========
+        # Include keywords from both primary assets AND similar assets
         all_keywords = []
         for asset in assets:
+            keywords = asset.get("keywords", [])
+            if isinstance(keywords, list):
+                all_keywords.extend(keywords)
+        
+        # Also include keywords from similar assets for broader niche detection
+        for asset in similar_assets:
             keywords = asset.get("keywords", [])
             if isinstance(keywords, list):
                 all_keywords.extend(keywords)
@@ -1902,7 +2034,8 @@ class DeepAnalyzer:
                 if len(kw_lower) > 2:  # Filter very short keywords
                     keyword_counts[kw_lower] = keyword_counts.get(kw_lower, 0) + 1
         
-        market["keyword_frequency"] = dict(sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:30])
+        # Store more keywords for better niche detection
+        market["keyword_frequency"] = dict(sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:50])
         
         # ========== CONTRIBUTOR ANALYSIS (Enhanced) ==========
         contributor_counts = {}
@@ -1965,6 +2098,212 @@ class DeepAnalyzer:
                 format_counts[fmt] = format_counts.get(fmt, 0) + 1
         
         market["format_distribution"] = format_counts
+        
+        # ========== CATEGORY DISTRIBUTION (Enhanced) ==========
+        # Collect comprehensive category data for accurate heatmap/niche analysis
+        # Include both primary assets AND similar assets for more accurate category distribution
+        category_data = {}
+        
+        # Combine assets and similar assets for comprehensive category analysis
+        all_assets_for_category = assets + similar_assets
+        
+        for asset in all_assets_for_category:
+            # Get category (explicit or inferred)
+            cat_name = asset.get("category")
+            cat_inferred = asset.get("category_inferred", False)
+            
+            if not cat_name and asset.get("keywords"):
+                # Infer from keywords if not explicitly found
+                inferred = infer_category_from_keywords(asset.get("keywords", []))
+                if inferred["confidence"] >= 2:
+                    cat_name = inferred["name"]
+                    cat_inferred = True
+            
+            if cat_name:
+                if cat_name not in category_data:
+                    category_data[cat_name] = {
+                        "count": 0,
+                        "asset_ids": [],
+                        "keywords": [],
+                        "prices": [],
+                        "premium_count": 0,
+                        "editorial_count": 0,
+                        "ai_count": 0,
+                        "contributors": set(),
+                        "inferred_count": 0,
+                        "explicit_count": 0,
+                    }
+                
+                cat = category_data[cat_name]
+                cat["count"] += 1
+                cat["asset_ids"].append(asset.get("asset_id"))
+                
+                # Collect keywords for this category
+                asset_keywords = asset.get("keywords", [])
+                cat["keywords"].extend(asset_keywords[:10])
+                
+                # Collect prices
+                if asset.get("price"):
+                    cat["prices"].append(asset["price"])
+                
+                # Content type counts
+                if asset.get("is_premium"):
+                    cat["premium_count"] += 1
+                if asset.get("is_editorial"):
+                    cat["editorial_count"] += 1
+                if asset.get("is_ai_generated"):
+                    cat["ai_count"] += 1
+                
+                # Track contributors
+                if asset.get("contributor_id"):
+                    cat["contributors"].add(asset["contributor_id"])
+                
+                # Track explicit vs inferred
+                if cat_inferred:
+                    cat["inferred_count"] += 1
+                else:
+                    cat["explicit_count"] += 1
+        
+        total_categorized = sum(c["count"] for c in category_data.values()) or 1
+        total_results = market.get("total_results", 0)
+        
+        # Build enhanced category distribution with per-category metrics
+        market["category_distribution"] = {name: data["count"] for name, data in category_data.items()}
+        market["top_categories"] = []
+        
+        for cat_name, data in sorted(category_data.items(), key=lambda x: x[1]["count"], reverse=True)[:15]:
+            count = data["count"]
+            
+            # Calculate category-specific metrics
+            cat_percentage = count / total_categorized * 100
+            cat_unique_contributors = len(data["contributors"])
+            cat_premium_ratio = data["premium_count"] / count if count > 0 else 0
+            cat_editorial_ratio = data["editorial_count"] / count if count > 0 else 0
+            cat_ai_ratio = data["ai_count"] / count if count > 0 else 0
+            
+            # Calculate category-specific demand based on its share of total results
+            # Higher share = higher demand for this category
+            estimated_category_results = int(total_results * (cat_percentage / 100))
+            
+            # Category demand score (based on estimated results in this category)
+            if estimated_category_results >= 1000000:
+                cat_demand = 95 + min((estimated_category_results - 1000000) / 10000000 * 5, 5)
+            elif estimated_category_results >= 100000:
+                cat_demand = 80 + (estimated_category_results - 100000) / 900000 * 15
+            elif estimated_category_results >= 10000:
+                cat_demand = 60 + (estimated_category_results - 10000) / 90000 * 20
+            elif estimated_category_results >= 1000:
+                cat_demand = 40 + (estimated_category_results - 1000) / 9000 * 20
+            elif estimated_category_results >= 100:
+                cat_demand = 20 + (estimated_category_results - 100) / 900 * 20
+            else:
+                cat_demand = max(10, estimated_category_results / 100 * 20)
+            
+            # Category competition score (based on contributor density and premium ratio)
+            # More contributors + higher premium = more competition
+            contributor_density = cat_unique_contributors / count if count > 0 else 0
+            cat_competition = min(100, (
+                cat_percentage * 0.3 +  # Higher share = more competition
+                contributor_density * 50 * 0.3 +  # More diverse contributors = more competition
+                cat_premium_ratio * 100 * 0.4  # Higher premium ratio = more established competition
+            ))
+            
+            # Get unique keywords for this category
+            keyword_counts = {}
+            for kw in data["keywords"]:
+                if isinstance(kw, str) and len(kw) > 2:
+                    kw_lower = kw.lower()
+                    keyword_counts[kw_lower] = keyword_counts.get(kw_lower, 0) + 1
+            
+            top_keywords = [kw for kw, _ in sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:10]]
+            
+            # Price analysis for category
+            cat_prices = data["prices"]
+            cat_price_analysis = {}
+            if cat_prices:
+                cat_price_analysis = {
+                    "min": min(cat_prices),
+                    "max": max(cat_prices),
+                    "avg": round(sum(cat_prices) / len(cat_prices), 2),
+                    "count": len(cat_prices),
+                }
+            
+            market["top_categories"].append({
+                "name": cat_name,
+                "count": count,
+                "percentage": round(cat_percentage, 1),
+                "asset_ids": data["asset_ids"][:10],
+                "unique_contributors": cat_unique_contributors,
+                "premium_ratio": round(cat_premium_ratio, 3),
+                "editorial_ratio": round(cat_editorial_ratio, 3),
+                "ai_ratio": round(cat_ai_ratio, 3),
+                "demand_score": round(cat_demand, 1),
+                "competition_score": round(cat_competition, 1),
+                "estimated_results": estimated_category_results,
+                "top_keywords": top_keywords,
+                "keyword_count": len(keyword_counts),
+                "price_analysis": cat_price_analysis,
+                "explicit_count": data["explicit_count"],
+                "inferred_count": data["inferred_count"],
+            })
+        
+        # ========== NICHE DETECTION (Enhanced) ==========
+        # Detect niches from keyword frequency with more detailed metrics
+        keyword_freq = market.get("keyword_frequency", {})
+        detected_niches = detect_niches_from_keywords(keyword_freq)
+        
+        # Enhance niche data with category-derived metrics
+        enhanced_niches = []
+        for niche in detected_niches[:10]:
+            niche_keywords = niche.get("keywords", [])
+            niche_keyword_count = niche.get("keyword_count", 0)
+            
+            # Calculate niche-specific metrics from matching assets
+            niche_assets = []
+            niche_prices = []
+            niche_contributors = set()
+            niche_premium = 0
+            
+            for asset in assets:
+                asset_keywords = [kw.lower() for kw in asset.get("keywords", []) if isinstance(kw, str)]
+                # Check if asset matches this niche
+                if any(nk.lower() in ' '.join(asset_keywords) for nk in niche_keywords[:5]):
+                    niche_assets.append(asset)
+                    if asset.get("price"):
+                        niche_prices.append(asset["price"])
+                    if asset.get("contributor_id"):
+                        niche_contributors.add(asset["contributor_id"])
+                    if asset.get("is_premium"):
+                        niche_premium += 1
+            
+            niche_asset_count = len(niche_assets)
+            niche_premium_ratio = niche_premium / niche_asset_count if niche_asset_count > 0 else 0
+            
+            # Calculate niche demand (based on keyword frequency score)
+            niche_demand = min(100, niche.get("score", 0) * 3)
+            
+            # Calculate niche competition
+            niche_competition = min(100, (
+                len(niche_contributors) * 5 +  # More contributors = more competition
+                niche_premium_ratio * 50  # Higher premium = more established
+            ))
+            
+            enhanced_niches.append({
+                "name": niche.get("name", ""),
+                "score": niche.get("score", 0),
+                "keywords": niche_keywords[:10],
+                "keyword_count": niche_keyword_count,
+                "category": niche.get("category", ""),
+                "description": niche.get("description", ""),
+                "asset_count": niche_asset_count,
+                "unique_contributors": len(niche_contributors),
+                "premium_ratio": round(niche_premium_ratio, 3),
+                "demand_score": round(niche_demand, 1),
+                "competition_score": round(niche_competition, 1),
+                "avg_price": round(sum(niche_prices) / len(niche_prices), 2) if niche_prices else None,
+            })
+        
+        market["detected_niches"] = enhanced_niches
         
         # ========== UPLOAD DATE ANALYSIS ==========
         dates = []
@@ -2298,8 +2637,79 @@ class DeepAnalyzer:
                 if fmt and fmt != "Unknown":
                     viz["format_distribution"].append({"name": fmt, "value": count})
         
+        # ========== CATEGORY HEATMAP (Enhanced) ==========
+        # Build heatmap data from enhanced category distribution
+        viz["category_heatmap"] = []
+        top_categories = market.get("top_categories", [])
+        
+        for cat_data in top_categories[:15]:
+            cat_name = cat_data.get("name", "")
+            if not cat_name:
+                continue
+            
+            # Use pre-calculated category-specific scores
+            cat_demand = cat_data.get("demand_score", 50)
+            cat_competition = cat_data.get("competition_score", 50)
+            
+            # Calculate opportunity: high demand + low competition = high opportunity
+            cat_opportunity = (cat_demand * 0.6 + (100 - cat_competition) * 0.4)
+            
+            # Determine competition level based on actual metrics
+            if cat_competition >= 70:
+                comp_level = "high"
+            elif cat_competition >= 40:
+                comp_level = "medium"
+            else:
+                comp_level = "low"
+            
+            viz["category_heatmap"].append({
+                "name": cat_name,
+                "slug": cat_name.lower().replace(" ", "-").replace("&", "and"),
+                "count": cat_data.get("count", 0),
+                "percentage": cat_data.get("percentage", 0),
+                "demand_score": round(cat_demand, 1),
+                "competition_score": round(cat_competition, 1),
+                "opportunity_score": round(cat_opportunity, 1),
+                "competition_level": comp_level,
+                "unique_contributors": cat_data.get("unique_contributors", 0),
+                "premium_ratio": cat_data.get("premium_ratio", 0),
+                "top_keywords": cat_data.get("top_keywords", [])[:5],
+                "keyword_count": cat_data.get("keyword_count", 0),
+                "estimated_results": cat_data.get("estimated_results", 0),
+                "price_analysis": cat_data.get("price_analysis", {}),
+            })
+        
+        # ========== NICHE ANALYSIS (Enhanced) ==========
+        # Use enhanced detected niches from market analysis
+        viz["niche_analysis"] = []
+        detected_niches = market.get("detected_niches", [])
+        
+        for niche in detected_niches[:10]:
+            niche_demand = niche.get("demand_score", 50)
+            niche_competition = niche.get("competition_score", 50)
+            
+            # Calculate opportunity score
+            niche_opportunity = (niche_demand * 0.6 + (100 - niche_competition) * 0.4)
+            
+            viz["niche_analysis"].append({
+                "name": niche.get("name", ""),
+                "score": niche.get("score", 0),
+                "demand_score": round(niche_demand, 1),
+                "competition_score": round(niche_competition, 1),
+                "opportunity_score": round(niche_opportunity, 1),
+                "keywords": niche.get("keywords", [])[:10],
+                "keyword_count": niche.get("keyword_count", 0),
+                "asset_count": niche.get("asset_count", 0),
+                "unique_contributors": niche.get("unique_contributors", 0),
+                "premium_ratio": niche.get("premium_ratio", 0),
+                "avg_price": niche.get("avg_price"),
+                "category": niche.get("category", ""),
+                "description": niche.get("description", ""),
+            })
+        
         logger.info(f"Visualization data: {len(viz['contributor_chart'])} contributors, "
                    f"{len(viz['keyword_cloud'])} keywords, {len(viz['price_distribution'])} price buckets, "
+                   f"{len(viz['category_heatmap'])} categories, {len(viz['niche_analysis'])} niches, "
                    f"{dates_found} dates found")
         
         return viz
